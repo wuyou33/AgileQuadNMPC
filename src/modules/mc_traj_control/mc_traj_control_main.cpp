@@ -78,6 +78,7 @@
 #include "mc_traj_control_params.h"
 #include <vector>
 #include <numeric>  // partial_sum
+#include <matrix/matrix/math.hpp>
 
 // parameters explicitly for work at ASL
 #define ASL_LAB_CENTER_X    1.6283f
@@ -212,6 +213,7 @@ private:
     bool _reset_alt_nom;
     bool _reset_psi_nom;
     bool _control_trajectory_started;
+    bool _entered_trajectory_feedback_controller;
     //~ bool _obs_force_timed_out;
     
     //NOTE: ELIMINATE VARIABLES THAT ARE PASSED AROUND 
@@ -252,6 +254,11 @@ private:
     math::Vector<3> _M_cor;			/**< corrective moment expressed in body coords */
     math::Vector<3> _M_sp;			/**< moment setpoint in body coords */
     math::Vector<3>	_att_control;	/**< attitude control vector */
+
+    /* Used in trajectory feedback controller */
+    matrix::Vector<float, 3> _u_prev;
+    matrix::Vector<float, 3> _att_des_prev;
+    matrix::Vector<float, 3> _om_des_prev;
     
     //int _n_spline_seg;      /** < number of segments in spline (not max number, necassarily) */
     
@@ -363,6 +370,7 @@ private:
      * Cross and dot product between two vectors
      */
     math::Vector<3>	cross(const math::Vector<3>& v1, const math::Vector<3>& v2);
+    matrix::Vector<float, 3> cross(const matrix::Vector<float, 3>& v1, const matrix::Vector<float, 3>& v2);
     float	dot(const math::Vector<3>& v1, const math::Vector<3>& v2);
     
     /**
@@ -390,7 +398,15 @@ private:
 					const std::vector<float>& vx_trans_coefs, const std::vector<float>& vy_trans_coefs, const std::vector<float>& vz_trans_coefs );
     void		dual_trajectory_transition_nominal_state( float cur_spline_t, int cur_seg, float cur_poly_t, 
 					float prev_spline_t, int prev_seg, float prev_poly_t);
-    void		trajectory_feedback_controller(float dt);
+    void		trajectory_feedback_controller(matrix::Vector<float, 12> x_nom, matrix::Vector<float, 4> u_nom, matrix::Vector<float, 12> x_act, matrix::Vector<float, 3> accel, float dt);
+
+    matrix::Matrix<float, 3, 3>     R_om(matrix::Vector<float, 3> x);
+    matrix::SquareMatrix<float, 3>  R_om_sq(matrix::Vector<float, 3> x);
+    float                           bq_1(matrix::Vector<float, 12> x);
+    float                           bq_2(matrix::Vector<float, 12> x);
+    float                           bq_3(matrix::Vector<float, 12> x);
+    matrix::Matrix<float, 3, 3>     rotation_matrix(double z, double y, double x);
+
     void        reset_trajectory();
     void		hold_position();
     void		force_orientation_mapping(math::Matrix<3,3>& R_S2W, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
@@ -665,6 +681,7 @@ MulticopterTrajectoryControl::poll_subscriptions(hrt_abstime t)
     if (updated) {
         orb_copy(ORB_ID(trajectory_spline), _traj_spline_sub, &_traj_spline);
         _control_trajectory_started = false;
+        _entered_trajectory_feedback_controller = false;
     }
     
     orb_check(_obs_force_sub, &updated);
@@ -800,6 +817,19 @@ MulticopterTrajectoryControl::cross(const math::Vector<3>& v1, const math::Vecto
 
 }
 
+matrix::Vector<float, 3>
+MulticopterTrajectoryControl::cross(const matrix::Vector<float, 3>& v1, const matrix::Vector<float, 3>& v2)
+{
+    /* cross product between two vectors*/
+    matrix::Vector<float, 3> res;
+
+    res(0) = v1(1)*v2(2) - v2(1)*v1(2);
+    res(1) = v2(0)*v1(2) - v1(0)*v2(2);
+    res(2) = v1(0)*v2(1) - v2(0)*v1(1);
+
+    return res;
+}
+
 float
 MulticopterTrajectoryControl::dot(const math::Vector<3>& v1,
         const math::Vector<3>& v2)
@@ -869,6 +899,7 @@ MulticopterTrajectoryControl::reset_trajectory()
         
     memset(&_traj_spline, 0, sizeof(_traj_spline));
     _control_trajectory_started = false;
+    _entered_trajectory_feedback_controller = false;
     _reset_pos_nom = true;
     _reset_alt_nom = true;
     _reset_psi_nom = true;
@@ -1244,6 +1275,8 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _M_nom = _J_B*(R_W2B*_R_N2W*al_nom - cross(_Omg_body, R_W2B*_R_N2W*_Omg_nom)) +
             cross(_Omg_body, _J_B*_Omg_body);
                 
+
+        // here
     } else {
         
         _pos_nom(0) = poly_eval(_x_coefs.at(_x_coefs.size()-1), poly_term_t);
@@ -1569,165 +1602,242 @@ MulticopterTrajectoryControl::dual_trajectory_transition_nominal_state(
     //~ 
 //~ }
 
+matrix::Matrix<float, 3, 3>
+MulticopterTrajectoryControl::R_om(matrix::Vector<float, 3> x) {
+    float a_arr[9] = { 1, 0, (float)(-sin(x(1))), 0, (float)(cos(x(0))), (float)(sin(x(0))*cos(x(1))), 0, (float)(-sin(x(0))), (float)(cos(x(0))*cos(x(1))) };
+    matrix::Matrix <float, 3, 3> a(a_arr);
+    return a;
+}
+
+matrix::SquareMatrix<float, 3>
+MulticopterTrajectoryControl::R_om_sq(matrix::Vector<float, 3> x) {
+    float a_arr[9] = { 1, 0, (float)(-sin(x(1))), 0, (float)(cos(x(0))), (float)(sin(x(0))*cos(x(1))), 0, (float)(-sin(x(0))), (float)(cos(x(0))*cos(x(1))) };
+    matrix::SquareMatrix <float, 3> a(a_arr);
+    return a;
+}
+
+float
+MulticopterTrajectoryControl::bq_1(matrix::Vector<float, 12> x) {
+    return sin(x(6))*sin(x(8)) + cos(x(6))*sin(x(7))*cos(x(8));
+}
+
+float
+MulticopterTrajectoryControl::bq_2(matrix::Vector<float, 12> x) {
+    return -sin(x(6))*cos(x(8)) + cos(x(6))*sin(x(7))*sin(x(8));
+}
+
+float
+MulticopterTrajectoryControl::bq_3(matrix::Vector<float, 12> x) {
+    return cos(x(6))*cos(x(7));
+}
+
+matrix::Matrix<float, 3, 3>
+MulticopterTrajectoryControl::rotation_matrix(double z, double y, double x) {
+    float Rz_arr[9] = { (float)cos(z), (float)sin(z), 0, (float)-sin(z), (float)cos(z), 0, 0, 0, 1 };
+    matrix::Matrix<float, 3, 3> Rz(Rz_arr);
+
+    float Ry_arr[9] = { (float)cos(y), 0, (float)-sin(y), 0, 1, 0, (float)sin(y), 0, (float)cos(y) };
+    matrix::Matrix<float, 3, 3> Ry(Ry_arr);
+
+    float Rx_arr[9] = { 1, 0, 0, 0, (float)cos(x), (float)sin(x), 0, (float)-sin(x), (float)cos(x) };
+    matrix::Matrix<float, 3, 3> Rx(Rx_arr);
+
+    return Rz.transpose() * Ry.transpose() * Rx.transpose();
+}
+
 /* Apply feedback control to nominal trajectory */
 void
-MulticopterTrajectoryControl::trajectory_feedback_controller(float dt)
+MulticopterTrajectoryControl::trajectory_feedback_controller(matrix::Vector<float, 12> x_nom, matrix::Vector<float, 4> u_nom, matrix::Vector<float, 12> x_act, matrix::Vector<float, 3> accel, float dt)
 {
+    // notes: Jq —>  _J_B — inertia matrix
+    // mq —> _mass — mass of quadroter
+
+    // see if there's an easier way to do this!
+    matrix::Matrix<float, 3, 3> J_B;
+    J_B(0, 0) = _J_B(0, 0);
+    J_B(0, 1) = _J_B(0, 1);
+    J_B(0, 2) = _J_B(0, 2);
+    J_B(1, 0) = _J_B(1, 0);
+    J_B(1, 1) = _J_B(1, 1);
+    J_B(1, 2) = _J_B(1, 2);
+    J_B(2, 0) = _J_B(2, 0);
+    J_B(2, 1) = _J_B(2, 1);
+    J_B(2, 2) = _J_B(2, 2);
+
+    matrix::Vector<float, 3> pos;
+    pos(0) = _pos(0);
+    pos(1) = _pos(1);
+    pos(2) = _pos(2);
+
+    matrix::Vector<float, 3> vel;
+    vel(0) = _vel(0);
+    vel(1) = _vel(1);
+    vel(2) = _vel(2);
+
+    matrix::Vector<float, 3> pos_nom;
+    pos_nom(0) = x_nom(0);
+    pos_nom(1) = x_nom(1);
+    pos_nom(2) = x_nom(2);
+
+    matrix::Vector<float, 3> vel_nom;
+    vel_nom(0) = x_nom(3);
+    vel_nom(1) = x_nom(4);
+    vel_nom(2) = x_nom(5);
+
     /* error terms */
-    math::Vector<3> pos_err;
-    pos_err.zero();
-    math::Vector<3> vel_err;
-    vel_err.zero();
-    math::Vector<3> vel_err_der;
-    vel_err_der.zero();
-    math::Vector<3> ang_err;
-    ang_err.zero();
-    math::Vector<3> omg_err;
-    omg_err.zero();
-    math::Vector<3> omg_err_der;
-    omg_err_der.zero();
-    
+    matrix::Vector<float, 3> pos_err;
+    pos_err.setZero();
+    matrix::Vector<float, 3> vel_err;
+    vel_err.setZero();
+    matrix::Vector<float, 3> vel_err_der;
+    vel_err_der.setZero();
+
     /* position and velocity error */
-    pos_err = _pos_nom - _pos;
-    vel_err = _vel_nom - _vel;
-    
-    /* calculate integral position error */
-    for (int i = 0; i < 3; i++){
-		float pei = _pos_err_int(i) + _gains.pos_int(i)*pos_err(i)*dt;
-		
-		if (isfinite(pei) && pei > -_safe_params.pos_int_limit(i) && 
-			pei < _safe_params.pos_int_limit(i)){
-				// note that mc_att_control also checks _M_cor is not greater than integral limit. Not sure why...
-				_pos_err_int(i) = pei;
-		}
-		
-	}
-	
-	/* calculate velocity error derivative */
-    vel_err_der = (vel_err - _vel_err_prev)/dt;
-    _vel_err_prev = vel_err;
-    
-    /* translational corrective input */
-    math::Vector<3> F_cor = _pos_err_int + pos_err.emult(_gains.pos) + vel_err.emult(_gains.vel) + vel_err_der.emult(_gains.vel_der); 	// corrective force term
-    
-    /* obstacle repulsive input */
-    math::Vector<3> F_rep;
-    F_rep(0) = _obs_force.Fx;
-    F_rep(1) = _obs_force.Fy;
-    F_rep(2) = _obs_force.Fz;
-    //~ printf("DEBUG: obs_force Fx = %d, Fy = %d, Fz = %d\n", (int)(1000.0f*F_rep(0)), (int)(1000.0f*F_rep(1)), (int)(1000.0f*F_rep(2)));
-    
-    math::Vector<3> F_des = _F_nom + F_cor + F_rep;	// combined, desired force
-    
-    /* map corrective force to input thrust, desired orientation, and desired angular velocity */
-    math::Matrix<3, 3> R_D2W;	R_D2W.zero();	// rotation matrix from desired body frame to world */
-    math::Vector<3> x_des;		x_des.zero();
-    math::Vector<3> y_des;		y_des.zero();
-    math::Vector<3> z_des;		z_des.zero();
-    float uT1_des = 0.0f;
-    math::Vector<3> Omg_des;	Omg_des.zero();
-    math::Vector<3> h_Omega;	h_Omega.zero();
-    force_orientation_mapping(R_D2W, x_des, y_des, z_des, 
-            _uT_sp, uT1_des, Omg_des, h_Omega, F_des, _psi_nom, _psi1_nom);
-    // uT_des is the first input value
-    // double check the calculation of uT1_des. F_cor doesn't affect?
-    
-    /** ROTATIONAL CORRECTIVE INPUT */
-    
-    /* fill attitude setpoint */
-    _att_sp.timestamp = hrt_absolute_time();
-    math::Vector<3> eul_des = R_D2W.to_euler();
-    _att_sp.roll_body = eul_des(0);
-    _att_sp.pitch_body = eul_des(1);
-    _att_sp.yaw_body = eul_des(2);
-    _att_sp.R_valid = false;
-    _att_sp.thrust = _uT_sp;
-    _att_sp.q_d_valid = false;
-    _att_sp.q_e_valid = false;
-    
-    /* publish attitude setpoint */
-    if (_att_sp_pub > 0) {
-        orb_publish(ORB_ID(vehicle_attitude_setpoint), _att_sp_pub, &_att_sp);
+    pos_err = pos - pos_nom;
+    vel_err = vel - vel_nom;
 
-    } else {
-        _att_sp_pub = orb_advertise(ORB_ID(vehicle_attitude_setpoint), &_att_sp);
-    }
-    
-    /* calculate angular error */
-    ang_err = vee_map((_R_B2W.transposed())*R_D2W - (R_D2W.transposed())*_R_B2W)*0.5f;
-    //~ math::Vector<3> temp_ang = _R_B2W.to_euler();
-    //~ math::Vector<3> temp_angSP = R_D2W.to_euler();
-    //~ printf("DEBUG: yaw %d \n", (int)(temp_ang(2)*10000.0f));
-    //~ printf("DEBUG: yaw SP %d \n", (int)(temp_angSP(2)*10000.0f));
-    //~ printf("DEBUG: ang err %d, %d, %d\n", (int)(ang_err(0)*10000.0f), (int)(ang_err(1)*10000.0f), (int)(ang_err(2)*10000.0f));
-    // Check valid orientation nearest to current (Mellinger & Kumar section IV)
-    //~ math::Matrix<3,3> R_D2W_neg = R_D2W;
-    //~ math::Vector<3> x_des_neg = -x_des;
-    //~ math::Vector<3> y_des_neg = -y_des;
-    //~ set_column(R_D2W_neg, 0, x_des_neg);
-    //~ set_column(R_D2W_neg, 1, y_des_neg);
-    //~ math::Vector<3> ang_err_neg = vee_map((_R_B2W.transposed())*R_D2W_neg - (R_D2W_neg.transposed())*_R_B2W)*0.5f;
-    //~ printf("DEBUG: ang err_neg %d, %d, %d\n", (int)(ang_err_neg(0)*1000.0f), (int)(ang_err_neg(1)*1000.0f), (int)(ang_err_neg(2)*1000.0f));
-    //~ if (ang_err_neg.length() < ang_err.length()) {
-        //~ R_D2W = R_D2W_neg;
-        //~ x_des = -x_des;
-        //~ y_des = -y_des;
-        //~ ang_err = ang_err_neg;
-        //~ printf("DEBUG: using neg\n");
-    //~ }
-    
-    /* calculate integral angular error */
-    for (int i = 0; i < 3; i++){
-		float aei = _ang_err_int(i) + _gains.ang_int(i)*ang_err(i)*dt;
-		
-		if (isfinite(aei) && aei > -_safe_params.ang_int_limit(i) && 
-			aei < _safe_params.ang_int_limit(i)){
-				// note that mc_att_control also checks _M_cor is not greater than integral limit. Not sure why...
-				_ang_err_int(i) = aei;
-		}
-		
-	}
-    
-    /* fill attitude rates setpoint */
-    _att_rates_sp.timestamp = hrt_absolute_time();
-    //~ math::Matrix<3,3> T_omg2dot;	T_omg2dot.zero();	// transformation matrix from angular velocity in body coords to euler rates
-    //~ T_omg2dot(0,0) = (float)cos((double)eul_des(1));
-    //~ T_omg2dot(0,2) = (float)sin((double)eul_des(1));
-    //~ T_omg2dot(1,0) = (float)(sin((double)eul_des(1))*tan((double)eul_des(0)));
-    //~ T_omg2dot(1,1) = 1.0f;
-    //~ T_omg2dot(1,2) = -(float)(cos((double)eul_des(1))*tan((double)eul_des(1)));
-    //~ T_omg2dot(2,0) = -(float)(sin((double)eul_des(1))/cos((double)eul_des(0)));
-    //~ T_omg2dot(2,2) = (float)(cos((double)eul_des(1))/cos((double)eul_des(0)));
-    //~ math::Vector<3> eul_rates_des = T_omg2dot*(_R_B2P.transposed()*Omg_des);
-    //~ math::Vector<3> eul_rates_des = T_omg2dot*Omg_des;
-    //~ _att_rates_sp.roll = eul_rates_des(0);
-    //~ _att_rates_sp.pitch = eul_rates_des(1);
-    //~ _att_rates_sp.yaw = eul_rates_des(2);
-    _att_rates_sp.roll = Omg_des(0);
-    _att_rates_sp.pitch = Omg_des(1);
-    _att_rates_sp.yaw = Omg_des(2);
-    
-    /* publish attitude rates setpoint */
-    if (_att_rates_sp_pub > 0) {
-        orb_publish(ORB_ID(vehicle_rates_setpoint), _att_rates_sp_pub, &_att_rates_sp);
+    matrix::Vector<float, 3> a_des = accel;
+    float kx = float(16) * _mass;
+    float kv = float(5.6) * _mass;
 
+    matrix::Vector<float, 3> temp1;
+    temp1(0) = 0;
+    temp1(1) = 0;
+    temp1(2) = 1;
+
+    matrix::Vector<float, 3> thrust_des = -kx * pos_err - kv * vel_err - _mass * GRAV * temp1 + _mass * a_des;
+
+    matrix::Matrix<float, 3, 3> R = rotation_matrix(x_nom(8), x_nom(7), x_nom(6));
+
+    matrix::Matrix<float, 1, 1> thrust_mat = thrust_des.transpose() * (R * -temp1);
+    float thrust = thrust_mat(0,0);
+    matrix::Vector<float, 3> zb_des = -thrust_des/thrust_des.norm();
+
+    float yaw_des = x_nom(8);
+    float pitch_des = atan2((zb_des(0) * (float)cos(yaw_des) + zb_des(1) * (float)sin(yaw_des)), (zb_des(2)));
+    float roll_des = atan2(zb_des(0) * (float)sin(yaw_des) - zb_des(1) * (float)cos(yaw_des), zb_des(2) / (float)cos(pitch_des));
+
+    matrix::Vector<float, 3> att_des;
+    att_des(0) = roll_des;
+    att_des(1) = pitch_des;
+    att_des(2) = yaw_des;
+
+    matrix::Vector<float, 3> rate_eul_des;
+    matrix::Vector<float, 3> om_des;
+    matrix::Vector<float, 3> torque_nom;
+
+    if (_entered_trajectory_feedback_controller) {
+        rate_eul_des = (att_des - _att_des_prev) / dt;
+        om_des = R_om(att_des) * rate_eul_des;
+        matrix::Vector<float, 3> ang_accel_des = (om_des - _om_des_prev)/dt;
+
+        torque_nom = J_B * ang_accel_des + cross(om_des, J_B*om_des);
+
+        _att_des_prev = att_des;
+        _om_des_prev = om_des;
     } else {
-        _att_rates_sp_pub = orb_advertise(ORB_ID(vehicle_rates_setpoint), &_att_rates_sp);
+        _entered_trajectory_feedback_controller = true;
+
+        matrix::Vector<float, 3> temp2;
+        temp2(0) = bq_1(x_act);     // not sure if x_act will be an input or will have to create
+        temp2(1) = bq_2(x_act);
+        temp2(2) = bq_3(x_act);
+
+        matrix::Vector<float, 3> a_pred = temp1 * GRAV + (-1 / _mass) * temp2 * thrust;
+        matrix::Vector<float, 3> x_pred = pos + dt * vel;
+        matrix::Vector<float, 3> v_pred = vel + dt * a_pred;
+
+        matrix::Vector<float, 3> err_x_pred = x_pred - pos;       // not sure if this is right (what is state_nom)
+        matrix::Vector<float, 3> err_v_pred = v_pred - vel;       // not sure
+
+        a_des = accel;      // not sure -- hardcode?
+
+        matrix::Vector<float, 3> thrust_des_pred = -kx * err_x_pred - kv * err_v_pred - _mass * GRAV * temp1 + _mass * a_des;
+        matrix::Vector<float, 3> zb_des_pred = -thrust_des_pred / thrust_des_pred.norm();
+        float yaw_des_pred = 0;          // CHANGE!! NOT SURE WHAT STATE_NOM IS!
+        float pitch_des_pred = atan2(zb_des_pred(0) * (float)cos(yaw_des_pred) + zb_des_pred(1) * (float)sin(yaw_des_pred), zb_des_pred(2));
+        float roll_des_pred = atan2(zb_des_pred(0) * (float)sin(yaw_des_pred) - zb_des_pred(1) * (float)cos(yaw_des_pred), zb_des_pred(2) / (float)cos(pitch_des_pred));
+        matrix::Vector<float, 3> att_des_pred;
+        att_des_pred(0) = roll_des_pred;
+        att_des_pred(1) = pitch_des_pred;
+        att_des_pred(2) = yaw_des_pred;
+
+        rate_eul_des = (att_des_pred - att_des) / dt;
+        om_des = R_om(att_des) * rate_eul_des;
+
+        matrix::Matrix<float, 3, 3> R_nom = rotation_matrix(x_nom(9),x_nom(8),x_nom(7));
+        matrix::Matrix<float, 3, 3> R_des = rotation_matrix(att_des(3),att_des(2),att_des(1));
+
+        // for now: ang_a
+        float ang_a_arr[3] = { 0.260454211054214, 0, 0 };
+        matrix::Vector<float, 3> ang_a(ang_a_arr);
+        matrix::Vector<float, 3> ang_accel_des = R_des.transpose() * R_nom * ang_a;
+        torque_nom = J_B * ang_accel_des + cross(om_des, J_B * om_des);
+
+        _att_des_prev = att_des;
+        _om_des_prev = om_des;
     }
-    
-    /* calculated angular velocity error */
-    omg_err = (_R_B2W.transposed())*R_D2W*Omg_des - _Omg_body;
-    
-    /* calculate angular velocity error derivative */
-    omg_err_der = (omg_err - _omg_err_prev)/dt;
-    _omg_err_prev = omg_err;
-    
-    /* calculate corrective (feedback) moment inputs */
-    _M_cor = _ang_err_int + ang_err.emult(_gains.ang) + omg_err.emult(_gains.omg) + omg_err_der.emult(_gains.omg_der);
-    //~ printf("DEBUG:  _M_cor %d, %d, %d\n", (int)(_M_cor(0)*10000.0f), (int)(_M_cor(1)*10000.0f), (int)(_M_cor(2)*10000.0f));
-    
-    /* calculate moment inputs */
-    _M_sp = _M_cor + _M_nom;
+//    matrix::Matrix<float, 2, 3> B(A.slice<2, 3>(1, 0));
+
+    matrix::Vector<float, 3> att;
+    att(0) = x_act(6);
+    att(1) = x_act(7);
+    att(2) = x_act(8);
+
+    matrix::Vector<float, 3> eul;
+    eul(0) = x_act(9);
+    eul(1) = x_act(10);
+    eul(2) = x_act(11);
+
+    matrix::SquareMatrix<float, 3> R_om_att = inv(R_om_sq(att));
+    matrix::Vector<float, 3> rate_eul_act = R_om_att * eul;
+
+    matrix::Vector<float, 6> q_des;
+    q_des(0) = att_des(0);
+    q_des(1) = att_des(1);
+    q_des(2) = att_des(2);
+    q_des(3) = rate_eul_des(0);
+    q_des(4) = rate_eul_des(1);
+    q_des(5) = rate_eul_des(2);
+
+    matrix::Vector<float, 6> q_act;
+    q_act(0) = x_act(6);
+    q_act(1) = x_act(7);
+    q_act(2) = x_act(8);
+    q_act(3) = rate_eul_act(0);
+    q_act(4) = rate_eul_act(1);
+    q_act(5) = rate_eul_act(2);
+
+    matrix::Vector<float, 6> xi_q_des;
+    xi_q_des(0) = att_des(0);
+    xi_q_des(1) = att_des(1);
+    xi_q_des(2) = att_des(2);
+    xi_q_des(3) = om_des(0);
+    xi_q_des(4) = om_des(1);
+    xi_q_des(5) = om_des(2);
+
+    float xi_q_act_arr[6] = { x_act(6), x_act(7), x_act(8), x_act(9), x_act(10), x_act(11) };
+    matrix::Vector<float, 6> xi_q_act(xi_q_act_arr);
+
+    matrix::Matrix<float, 6, 2> Xq_dot;                 // check
+    matrix::Vector<float, 6> temp4 = q_act-q_des;
+    Xq_dot.setCol(0, temp4);
+    Xq_dot.setCol(1, temp4);
+
+    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
+                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
+                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
+                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
+                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
+                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
+    matrix::Matrix<float, 6, 6> M_q(M_q_arr);
+
+    matrix::Vector<float, 1> E = (q_act - q_des).transpose() * M_q * (q_act - q_des);    // what is M_q?
+
+//    float lambda = 2.5;
+//    float u_b = -2 * lambda * E + 2 * Xq_dot.col(0).t() * (M(X_q.col(0)) * (f_rot(X_xi.col(0)) + B_rot * torque_nom))
+//                  - 2 * Xq_dot.col(k-1).t() * (M(X_q.col(k-1)) * (f_rot(X_xi.col(k-1)) + B_rot*torque_nom));
+
 }
 
 void
@@ -1757,6 +1867,7 @@ MulticopterTrajectoryControl::task_main()
 
     bool was_armed = false;
     _control_trajectory_started = false;
+    _entered_trajectory_feedback_controller = false;
     bool was_flag_control_trajectory_enabled = false;
 
 
@@ -1897,8 +2008,8 @@ MulticopterTrajectoryControl::task_main()
 					_x_coefs.swap(_prev_x_coefs);
 					_xv_coefs.swap(_prev_xv_coefs);
 					_xa_coefs.swap(_prev_xa_coefs);
-					_xj_coefs.swap(_prev_xj_coefs);
-					_xs_coefs.swap(_prev_xs_coefs);
+                    _xj_coefs.swap(_prev_xj_coefs); // not used
+                    _xs_coefs.swap(_prev_xs_coefs); // not used
 					_y_coefs.swap(_prev_y_coefs);
 					_yv_coefs.swap(_prev_yv_coefs);
 					_ya_coefs.swap(_prev_ya_coefs);
@@ -1910,8 +2021,8 @@ MulticopterTrajectoryControl::task_main()
 					_zj_coefs.swap(_prev_zj_coefs);
 					_zs_coefs.swap(_prev_zs_coefs);
 					_yaw_coefs.swap(_prev_yaw_coefs);
-					_yaw1_coefs.swap(_prev_yaw1_coefs);
-					_yaw2_coefs.swap(_prev_yaw2_coefs);
+                    _yaw1_coefs.swap(_prev_yaw1_coefs); // not used
+                    _yaw2_coefs.swap(_prev_yaw2_coefs); // not used
                     
                     // number of segments in spline
                     int n_spline_seg = _traj_spline.segArr[0].nSeg;
@@ -2101,7 +2212,30 @@ MulticopterTrajectoryControl::task_main()
             /**
              * Apply feedback control to nominal trajectory
              */
-            trajectory_feedback_controller(dt);
+            float arr_x_nom[12] = { 0, 1, 0, 1.25663706143592, 0, 0, -0.159602993655440, 0, 0, 0, 0.199712626559595, 0.0321481691016627 };
+            matrix::Vector<float, 12> x_nom(arr_x_nom);
+
+            float arr_u_nom[4] = { 43.1234797673153, 0.0216988103358935, 0, 0 };
+            matrix::Vector<float, 4> u_nom(arr_u_nom);
+
+            float arr_x_act[12] = { -0.0666838971714053,
+                                 1.05637461391708,
+                                 0.0175089705301656,
+                                 1.24168375991927,
+                                 0.00114448963758149,
+                                 -0.0130997717483046,
+                                 -0.251243898971014,
+                                 -0.0149566498975779,
+                                 -0.0435302487530237,
+                                 -0.0512711222443734,
+                                 0.139163577459043,
+                                 0.00421118418670079 };
+            matrix::Vector<float, 12> x_act(arr_x_act);
+
+            float arr_accel[3] = { 0, -1.57913670417430, 0 };
+            matrix::Vector<float, 3> accel(arr_accel);
+
+            trajectory_feedback_controller(x_nom, u_nom, x_act, accel, dt);
             _att_control = _M_sp;
             
             /**
