@@ -1685,9 +1685,6 @@ MulticopterTrajectoryControl::M(math::Vector<6> x) {
 void
 MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_nom, math::Vector<12> x_act, math::Vector<3> accel, float dt)
 {
-    // notes: Jq —>  _J_B — inertia matrix
-    // mq —> _mass — mass of quadroter
-
     /* position and velocity errors */
     math::Vector<3> pos_err = _pos - _pos_nom;
     math::Vector<3> vel_err = _vel - _vel_nom;
@@ -1824,7 +1821,7 @@ MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_
                 (Xq_dot.transposed() * (M(q_act) * (f_rot(xi_q_act) * (float)2 + B_rot * torque_nom)))(0);      // (0) gets float from math::Vector
 
     float a = -u_b;
-    math::Vector<3> b({A(0, 1), A(0, 1), A(0, 1)});
+    math::Vector<3> b( {A(0, 0), A(0, 1), A(0, 2)} );
     math::Vector<3> u_aux;
 
     if (b.length() == 0 || (a <= 0)) {   // comparing floating point with == is unsafe
