@@ -78,7 +78,6 @@
 #include "mc_traj_control_params.h"
 #include <vector>
 #include <numeric>  // partial_sum
-#include <matrix/matrix/math.hpp>
 #include <limits>   // for inf
 
 // parameters explicitly for work at ASL
@@ -411,10 +410,9 @@ private:
     float                           bq_2(math::Vector<3> x);
     float                           bq_3(math::Vector<3> x);
     math::Matrix<3, 3>              rotation_matrix(double z, double y, double x);
-    matrix::Matrix<float, 6, 6>     phi_d(matrix::Vector<float, 6> x);
-    matrix::SquareMatrix<float, 6>  phi_d_sq(matrix::Vector<float, 6> x);
-    matrix::Matrix<float, 6, 6>     M(matrix::Vector<float, 6> x);
-    matrix::Vector<float, 6>        f_rot(matrix::Vector<float, 6>);
+    math::Matrix<6, 6>              phi_d(math::Vector<6> x);
+    math::Matrix<6, 6>              M(math::Vector<6> x);
+    math::Vector<6>                 f_rot(math::Vector<6>);
 
     void        reset_trajectory();
     void		hold_position();
@@ -1441,7 +1439,7 @@ MulticopterTrajectoryControl::dual_trajectory_transition_nominal_state(
 math::Matrix<3, 3>
 MulticopterTrajectoryControl::R_om(math::Vector<3> x) {
     float a_arr[9] = { 1, 0, (float)(-sin(x(1))), 0, (float)(cos(x(0))), (float)(sin(x(0))*cos(x(1))), 0, (float)(-sin(x(0))), (float)(cos(x(0))*cos(x(1))) };
-    math::Matrix <3, 3> a(a_arr);
+    math::Matrix<3, 3> a(a_arr);
     return a;
 }
 
@@ -1474,104 +1472,78 @@ MulticopterTrajectoryControl::rotation_matrix(double z, double y, double x) {
     return Rz.transposed() * Ry.transposed() * Rx.transposed();
 }
 
-//matrix::Matrix<float, 6, 6>
-//MulticopterTrajectoryControl::phi_d(matrix::Vector<float, 6> x) {
-//    matrix::Vector<float, 3> x_input;
-//    x_input(0) = x(0);
-//    x_input(1) = x(1);
-//    x_input(2) = x(2);
-//    matrix::SquareMatrix<float, 3> R_om_x = R_om_sq(x_input);       // not sure if sq is needed
+math::Matrix<6, 6>
+MulticopterTrajectoryControl::phi_d(math::Vector<6> x) {
+    math::Vector<3> x_input;
+    x_input(0) = x(0);
+    x_input(1) = x(1);
+    x_input(2) = x(2);
+    math::Matrix<3, 3> R_om_x = R_om(x_input);
 
-//    float mat_arr[36] = { 1, 0, 0, 0, 0, 0,
-//                          0, 1, 0, 0, 0, 0,
-//                          0, 0, 1, 0, 0, 0,
-//                          0, -x(5) * (float)cos(x(1)), 0, R_om_x(0, 0), R_om_x(0, 1), R_om_x(0, 2),
-//                         -x(4) * (float)sin(x(0)) + x(5) * (float)cos(x(0)) * (float)cos(x(1)), -x(5) * (float)sin(x(0)) * (float)sin(x(1)), 0, R_om_x(1, 0), R_om_x(1, 1), R_om_x(1, 2),
-//                         -x(4) * (float)cos(x(0)) - x(5) * (float)sin(x(0)) * (float)cos(x(1)), -x(5) * (float)cos(x(0)) * (float)sin(x(1)), 0, R_om_x(2, 0), R_om_x(2, 1), R_om_x(2, 2)};
+    float mat_arr[36] = { 1, 0, 0, 0, 0, 0,
+                          0, 1, 0, 0, 0, 0,
+                          0, 0, 1, 0, 0, 0,
+                          0, -x(5) * (float)cos(x(1)), 0, R_om_x(0, 0), R_om_x(0, 1), R_om_x(0, 2),
+                         -x(4) * (float)sin(x(0)) + x(5) * (float)cos(x(0)) * (float)cos(x(1)), -x(5) * (float)sin(x(0)) * (float)sin(x(1)), 0, R_om_x(1, 0), R_om_x(1, 1), R_om_x(1, 2),
+                         -x(4) * (float)cos(x(0)) - x(5) * (float)sin(x(0)) * (float)cos(x(1)), -x(5) * (float)cos(x(0)) * (float)sin(x(1)), 0, R_om_x(2, 0), R_om_x(2, 1), R_om_x(2, 2)};
 
-//    matrix::Matrix<float, 6, 6> mat(mat_arr);
-//    return mat;
-//}
+    math::Matrix<6, 6> mat(mat_arr);
+    return mat;
+}
 
-//matrix::SquareMatrix<float, 6>
-//MulticopterTrajectoryControl::phi_d_sq(matrix::Vector<float, 6> x) {
-//    matrix::Vector<float, 3> x_input;
-//    x_input(0) = x(0);
-//    x_input(1) = x(1);
-//    x_input(2) = x(2);
-//    matrix::SquareMatrix<float, 3> R_om_x = R_om_sq(x_input);       // not sure if sq is needed
+math::Vector<6>
+MulticopterTrajectoryControl::f_rot(math::Vector<6> x) {
+    float Jx = _J_B(0, 0);
+    float Jy = _J_B(1, 1);
+    float Jz = _J_B(2, 2);
 
-//    float mat_arr[36] = { 1, 0, 0, 0, 0, 0,
-//                          0, 1, 0, 0, 0, 0,
-//                          0, 0, 1, 0, 0, 0,
-//                          0, -x(5) * (float)cos(x(1)), 0, R_om_x(0, 0), R_om_x(0, 1), R_om_x(0, 2),
-//                         -x(4) * (float)sin(x(0)) + x(5) * (float)cos(x(0)) * (float)cos(x(1)), -x(5) * (float)sin(x(0)) * (float)sin(x(1)), 0, R_om_x(1, 0), R_om_x(1, 1), R_om_x(1, 2),
-//                         -x(4) * (float)cos(x(0)) - x(5) * (float)sin(x(0)) * (float)cos(x(1)), -x(5) * (float)cos(x(0)) * (float)sin(x(1)), 0, R_om_x(2, 0), R_om_x(2, 1), R_om_x(2, 2)};
+    float a = (Jy-Jz)/Jx;
+    float b = (Jz-Jx)/Jy;
+    float c = (Jx-Jy)/Jz;
 
-//    matrix::SquareMatrix<float, 6> sq_mat(mat_arr);
-//    return sq_mat;
-//}
+    float vec_arr[6] = { x(3) + x(4)*(float)tan(x(1))*(float)sin(x(0)) + x(5)*(float)tan(x(1))*(float)cos(x(0)),
+                         x(4)*(float)cos(x(0)) - x(5)*(float)sin(x(0)),
+                         x(4)/(float)cos((x(1)))*(float)sin(x(0)) + x(5)/(float)cos(x(1))*(float)cos(x(0)),
+                         a*x(4)*x(5),
+                         b*x(3)*x(5),
+                         c*x(3)*x(4) };
+    math::Vector<6> vec(vec_arr);
+    return vec;
+}
 
-//matrix::Vector<float, 6>
-//MulticopterTrajectoryControl::f_rot(matrix::Vector<float, 6> x) {
-//    float Jx = _J_B(0, 0);
-//    float Jy = _J_B(1, 1);
-//    float Jz = _J_B(2, 2);
+math::Matrix<6, 6>
+MulticopterTrajectoryControl::M(math::Vector<6> x) {
+    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
+                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
+                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
+                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
+                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
+                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
+    math::Matrix<6, 6> M_q(M_q_arr);
 
-//    float a = (Jy-Jz)/Jx;
-//    float b = (Jz-Jx)/Jy;
-//    float c = (Jx-Jy)/Jz;
-//    float vec_arr[6] = { x(3) + x(4)*(float)tan(x(1))*(float)sin(x(0)) + x(5)*(float)tan(x(1))*(float)cos(x(0)),
-//                         x(4)*(float)cos(x(0)) - x(5)*(float)sin(x(0)),
-//                         x(4)/(float)cos((x(1)))*(float)sin(x(0)) + x(5)/(float)cos(x(1))*(float)cos(x(0)),
-//                         a*x(4)*x(5),
-//                         b*x(3)*x(5),
-//                         c*x(3)*x(4) };
-//    matrix::Vector<float, 6> vec(vec_arr);
-//    return vec;
-//}
-
-//matrix::Matrix<float, 6, 6>
-//MulticopterTrajectoryControl::M(matrix::Vector<float, 6> x) {
-//    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
-//                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
-//                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
-//                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
-//                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
-//                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
-//    matrix::Matrix<float, 6, 6> M_q(M_q_arr);
-
-//    // maybe make M_q a global variable
-//    // make sure solve is correct!
-//    matrix::Matrix<float, 6, 6> temp = matrix::inv(phi_d_sq(x)) * matrix::eye<float, 6>();
-//    return M_q * temp;
-//}
+    // maybe make M_q a global variable
+    // make sure solve is correct!
+    math::Matrix<6, 6> temp = phi_d(x).inversed();
+    return M_q * temp;
+}
 
 /* Apply feedback control to nominal trajectory */
 void
 MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_nom, math::Vector<12> x_act, math::Vector<3> accel, float dt)
 {
-    // notes: Jq —>  _J_B — inertia matrix
-    // mq —> _mass — mass of quadroter
-
-    float J_B_arr[9] = { _J_B(0, 0), _J_B(0, 1), _J_B(0, 2),
-                         _J_B(1, 0), _J_B(1, 1), _J_B(1, 2),
-                         _J_B(2, 0), _J_B(2, 1), _J_B(2, 2) };
-    math::Matrix<3, 3> J_B(J_B_arr);    // from math::Matrix to matrix::SquareMatrix
-
     /* position and velocity errors */
     math::Vector<3> pos_err = _pos - _pos_nom;
     math::Vector<3> vel_err = _vel - _vel_nom;
 
     math::Vector<3> a_des = accel; // check
 
-    math::Vector<3> temp1({0, 0, 1});
+    math::Vector<3> temp({0, 0, 1});
 
-    math::Vector<3> thrust_des = pos_err * -kx - vel_err * kv - temp1 * _mass * GRAV + a_des * _mass;
+    math::Vector<3> thrust_des = pos_err * -kx - vel_err * kv - temp * _mass * GRAV + a_des * _mass;
 
     math::Matrix<3, 3> R = rotation_matrix(x_nom(8), x_nom(7), x_nom(6));
 
-    float thrust = thrust_des * (R * -temp1);
+    float thrust = thrust_des * (R * -temp);
 
     math::Vector<3> zb_des = -thrust_des / thrust_des.length();
 
@@ -1593,14 +1565,14 @@ MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_
         om_des = R_om(att_des) * rate_eul_des;
         math::Vector<3> ang_accel_des = (om_des - _om_des_prev)/dt;
 
-        torque_nom = J_B * ang_accel_des + cross(om_des, J_B*om_des);
+        torque_nom = _J_B * ang_accel_des + cross(om_des, _J_B*om_des);
 
         _att_des_prev = att_des;
         _om_des_prev = om_des;
     } else {
         _entered_trajectory_feedback_controller = true;
-        math::Vector<3> temp2({ bq_1(x_act), bq_2(x_act), bq_3(x_act) });
-        math::Vector<3> a_pred = temp1 * GRAV + temp2 * thrust * ((float)-1.0 / _mass);
+        math::Vector<3> bq_temp({ bq_1(x_act), bq_2(x_act), bq_3(x_act) });
+        math::Vector<3> a_pred = temp * GRAV + bq_temp * thrust * ((float)-1.0 / _mass);
         math::Vector<3> x_pred = _pos + _vel * dt;
         math::Vector<3> v_pred = _vel + a_pred * dt;
 
@@ -1609,7 +1581,7 @@ MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_
 
         a_des = accel;      // CHECK -- hardcode?
 
-        math::Vector<3> thrust_des_pred = err_x_pred * -kx - err_v_pred * kv - temp1 * _mass * GRAV + a_des * _mass;
+        math::Vector<3> thrust_des_pred = err_x_pred * -kx - err_v_pred * kv - temp * _mass * GRAV + a_des * _mass;
         math::Vector<3> zb_des_pred = -thrust_des_pred / thrust_des_pred.length();
 
         float yaw_des_pred = 0;          // CHECK!! not sure what state_nom(2, 9) should be
@@ -1627,11 +1599,10 @@ MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_
         math::Matrix<3, 3> R_nom = rotation_matrix(x_nom(9), x_nom(8), x_nom(7));
         math::Matrix<3, 3> R_des = rotation_matrix(att_des(3), att_des(2), att_des(1));
 
-        // for now: ang_a -- change later
-        float ang_a_arr[3] = { 0.260454211054214, 0, 0 };
+        float ang_a_arr[3] = { 0.0, 0.0, 0.0 };
         math::Vector<3> ang_a(ang_a_arr);
         math::Vector<3> ang_accel_des = R_des.transposed() * R_nom * ang_a;
-        torque_nom = J_B * ang_accel_des + cross(om_des, J_B * om_des);
+        torque_nom = _J_B * ang_accel_des + cross(om_des, _J_B * om_des);
 
         _att_des_prev = att_des;
         _om_des_prev = om_des;
@@ -1647,62 +1618,63 @@ MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_
     eul(1) = x_act(10);
     eul(2) = x_act(11);
 
-    math::Vector<3> rate_eul_act = R_om(att) * eul;
+    math::Vector<3> rate_eul_act = R_om(att).inversed() * eul;  // check
 
-//    float q_des_arr[6] = { att_des(0), att_des(1), att_des(2), rate_eul_des(0), rate_eul_des(1), rate_eul_des(2) };
-//    matrix::Vector<float, 6> q_des(q_des_arr);
+    float q_des_arr[6] = { att_des(0), att_des(1), att_des(2), rate_eul_des(0), rate_eul_des(1), rate_eul_des(2) };
+    math::Vector<6> q_des(q_des_arr);
 
-//    float q_act_arr[6] = { x_act(6), x_act(7), x_act(8), rate_eul_act(0), rate_eul_act(1), rate_eul_act(2) };
-//    matrix::Vector<float, 6> q_act(q_act_arr);
+    float q_act_arr[6] = { x_act(6), x_act(7), x_act(8), rate_eul_act(0), rate_eul_act(1), rate_eul_act(2) };
+    math::Vector<6> q_act(q_act_arr);
 
-//    float xi_q_des_arr[6] = { att_des(0), att_des(1), att_des(2), om_des(0), om_des(1), om_des(2) };
-//    matrix::Vector<float, 6> xi_q_des(xi_q_des_arr);
+    float xi_q_des_arr[6] = { att_des(0), att_des(1), att_des(2), om_des(0), om_des(1), om_des(2) };
+    math::Vector<6> xi_q_des(xi_q_des_arr);
 
-//    float xi_q_act_arr[6] = { x_act(6), x_act(7), x_act(8), x_act(9), x_act(10), x_act(11) };
-//    matrix::Vector<float, 6> xi_q_act(xi_q_act_arr);
+    float xi_q_act_arr[6] = { x_act(6), x_act(7), x_act(8), x_act(9), x_act(10), x_act(11) };
+    math::Vector<6> xi_q_act(xi_q_act_arr);
 
-//    matrix::Vector<float, 6> Xq_dot = q_act - q_des;
+    // maybe make M_q global
+    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
+                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
+                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
+                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
+                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
+                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
+    math::Matrix<6, 6> M_q(M_q_arr);
 
-//    // maybe make M_q global
-//    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
-//                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
-//                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
-//                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
-//                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
-//                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
-//    matrix::Matrix<float, 6, 6> M_q(M_q_arr);
+    math::Matrix<6, 1> Xq_dot;
+    Xq_dot.set_col(0, q_act-q_des);
+    math::Matrix<1, 1> E = Xq_dot.transposed() * M_q * Xq_dot;
 
-//    matrix::Vector<float, 1> E = (q_act - q_des).transpose() * M_q * (q_act - q_des);    // what is M_q?
+    math::Matrix<3, 3> B_temp = _J_B.inversed();
+    float B_rot_arr[18] = { 0, 0, 0,
+                            0, 0, 0,
+                            0, 0, 0,
+                            B_temp(0, 0), 0, 0,
+                            0, B_temp(1, 1), 0,
+                            0, 0, B_temp(2, 2) };
+    math::Matrix<6, 3> B_rot(B_rot_arr);
 
-//    matrix::Matrix<float, 3, 3> B_temp = matrix::inv(J_B);
-//    float B_rot_arr[18] = { 0, 0, 0,
-//                            0, 0, 0,
-//                            0, 0, 0,
-//                            B_temp(0, 0), 0, 0,
-//                            0, B_temp(1, 1), 0,
-//                            0, 0, B_temp(2, 2) };
-//    matrix::Matrix<float, 6, 3> B_rot(B_rot_arr);
+    math::Matrix<1, 3> A = (Xq_dot * (float)2).transposed() *
+                           (M(q_act) * B_rot);
 
-//    matrix::Matrix<float, 1, 3> A = ((float)2 * Xq_dot).transpose() *
-//                                    (M(q_act) * B_rot);
+//    float infinity = std::numeric_limits<float>::infinity();
+//    float l_b = -infinity;
+    float lambda = 2.5;
+    float u_b = (E * (float)-2 * lambda)(0, 0) +            // (0, 0) gets float from math::Matrix
+                (Xq_dot.transposed() * (M(q_des) * (f_rot(xi_q_des) * (float)2 + B_rot * torque_nom)))(0) -     // (0) gets float from math::Vector
+                (Xq_dot.transposed() * (M(q_act) * (f_rot(xi_q_act) * (float)2 + B_rot * torque_nom)))(0);      // (0) gets float from math::Vector
 
-////    float infinity = std::numeric_limits<float>::infinity();
-////    float l_b = -infinity;
-//    float lambda = 2.5;
-//    matrix::Matrix<float, 1, 1> u_b = (float)-2 * lambda * E +
-//                                      (float)2 * Xq_dot.transpose() * (M(q_des) * (f_rot(xi_q_des) + B_rot * torque_nom)) -
-//                                      (float)2 * Xq_dot.transpose() * (M(q_act) * (f_rot(xi_q_act) + B_rot * torque_nom));
-//    float a = -u_b(0, 0);
-//    matrix::Vector<float, 3> b = A.transpose();
-//    matrix::Vector<float, 3> u_aux;
+    float a = -u_b;
+    math::Vector<3> b( {A(0, 0), A(0, 1), A(0, 2)} );
+    math::Vector<3> u_aux;
 
-//    if (b.norm() == 0 || (a <= 0))  {   // comparing floating point with == is unsafe
-//        u_aux(0) = 0.0;
-//        u_aux(1) = 0.0;
-//        u_aux(2) = 0.0;
-//    } else {
-//        u_aux = -(a / (b.transpose() * b)(0,0)) * b;
-//    }
+    if (b.length() == 0 || (a <= 0)) {   // comparing floating point with == is unsafe
+        u_aux(0) = 0.0;
+        u_aux(1) = 0.0;
+        u_aux(2) = 0.0;
+    } else {
+        u_aux = b * -(a / (A * b)(0));
+    }
 }
 
 void
