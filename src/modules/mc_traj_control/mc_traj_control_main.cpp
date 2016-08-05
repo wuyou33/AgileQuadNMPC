@@ -228,18 +228,37 @@ private:
     math::Vector<3> _y_body;	/**< y-axis of body frame in world coords */
     math::Vector<3> _z_body;	/**< z-axis of body frame in world coords */
     math::Vector<3> _Omg_body;	/**< angular velocity of body frame wrt world, in body frame */
-
+    
+    /* error terms for integral and derivative control */
+    math::Vector<3> _omg_err_prev;  /**< angular velocity previous error */
+    math::Vector<3> _pos_err_int;	/**< position error integral */
+    math::Vector<3> _ang_err_int;	/**< angular error integral*/
+    math::Vector<3> _vel_err_prev;  /**< velocity previous error */
     
     /* Nominal states, properties, and inputs */
     math::Vector<3> _pos_nom;		/**< nominal position */
     math::Vector<3> _vel_nom;		/**< nominal velocity */
     math::Vector<3> _acc_nom;       /**< nominal acceleration */
-
-    float _psi_nom;					/**< nominal yaw */
-
-    float			_uT_sp;			/**< thrust setpoint */
+    math::Vector<3> _jerk_nom;      /**< nominal jerk (3rd derivative) */
+    math::Vector<3> _snap_nom;   	/**< nominal snap (4rd derivative) */
+    float _psi_nom;		/**< nominal yaw */
+    float _psi1_nom;		/**< nominal yaw 1st derivative*/
+    float _psi2_nom;		/**< nominal yaw 2nd derivative*/
+    math::Matrix<3, 3> _R_N2W;		/**< rotation matrix from nominal to world frame */
+    math::Vector<3> _Omg_nom;		/**< nominal angular velocity wrt to world, expressed in nominal */
+    math::Vector<3> _F_nom;			/**< nominal force expressed in world coords */
+    math::Vector<3> _F_cor;			/**< corrective force in world coords */
+    float			_uT_nom;		/**< nominal thrust setpoint */
+    float			_uT_sp;		/**< thrust setpoint */
+    math::Vector<3> _M_nom;			/**< nominal moment expressed in body coords */
+    math::Vector<3> _M_cor;			/**< corrective moment expressed in body coords */
     math::Vector<3> _M_sp;			/**< moment setpoint in body coords */
     math::Vector<3>	_att_control;	/**< attitude control vector */
+
+    /* Used in trajectory feedback controller */
+    matrix::Vector<float, 3> _u_prev;
+    matrix::Vector<float, 3> _att_des_prev;
+    matrix::Vector<float, 3> _om_des_prev;
     
     //int _n_spline_seg;      /** < number of segments in spline (not max number, necassarily) */
     
@@ -534,16 +553,28 @@ MulticopterTrajectoryControl::MulticopterTrajectoryControl() :
     //~ _R_B2P(0,1) = (float)sin(M_PI_4);
     //~ _R_B2P(1,0) = -(float)sin(M_PI_4);
     //~ _R_B2P(1,1) = (float)cos(M_PI_4);
-
+    
+    _omg_err_prev.zero();
+    _ang_err_int.zero();
+    _pos_err_int.zero();
+    _vel_err_prev.zero();
 
     _pos_nom.zero();
     _vel_nom.zero();
     _acc_nom.zero();
-
+    _jerk_nom.zero();
+    _snap_nom.zero();
     _psi_nom = 0.0f;
-
+    _psi1_nom = 0.0f;
+    _psi2_nom = 0.0f;
+    _R_N2W.identity();
+    _Omg_nom.zero();
+    _F_nom.zero();
+    _F_cor.zero();
+    _uT_nom = 0.0f;
     _uT_sp = 0.0f;
-
+    _M_nom.zero();
+    _M_cor.zero();
     _M_sp.zero();
     _att_control.zero();
 
@@ -714,18 +745,16 @@ MulticopterTrajectoryControl::reset_pos_nom()
 {
     if (_reset_pos_nom) {
         _reset_pos_nom = false;
-        /*
         if (_gains.pos.length() > ZERO_GAIN_THRESHOLD && _gains.vel.length() > ZERO_GAIN_THRESHOLD){
-            /* shift position setpoint to make attitude setpoint continuous
+            /* shift position setpoint to make attitude setpoint continuous */
             _pos_nom(0) = _pos(0) + (_vel(0) - _vel_nom(0) - 
                     _R_N2W(0,2) * _uT_sp / _gains.vel(0)) / _gains.pos(0);
             _pos_nom(1) = _pos(1) + (_vel(1) - _vel_nom(1) - 
                     _R_N2W(0,1) * _uT_sp / _gains.vel(1)) / _gains.pos(1);
         } else {
-        */
             _pos_nom(0) = _pos(0);
             _pos_nom(1) = _pos(1);
-        //}
+        }
         mavlink_log_info(_mavlink_fd, "[mtc] reset pos sp: %.2f, %.2f", (double)_pos_nom(0), (double)_pos_nom(1));
     }
 }
@@ -884,14 +913,31 @@ MulticopterTrajectoryControl::reset_trajectory()
     _pos_nom.zero();
     _vel_nom.zero();
     _acc_nom.zero();
+    _jerk_nom.zero();
+    _snap_nom.zero();
     _psi_nom = 0.0f;
+    _psi1_nom = 0.0f;
+    _psi2_nom = 0.0f;
+    _R_N2W.identity();
+    _Omg_nom.zero();
+    _F_nom.zero();
+    _F_cor.zero();
+    _uT_nom = 0.0f;
     _uT_sp = 0.0f;
+    _M_nom.zero();
+    _M_cor.zero();
     _M_sp.zero();
     _att_control.zero();
     _k_thr = 1.0f/(TRAJ_PARAMS_THROTTLE_PER_THRUST*_mass);
     _thr_prev = TRAJ_PARAMS_THROTTLE_PER_THRUST*_mass*GRAV;
     memset(&_obs_force, 0, sizeof(_obs_force));
-
+    
+    // reset angular and position error integrals
+    _omg_err_prev.zero();
+    _ang_err_int.zero();
+    _pos_err_int.zero();
+    _vel_err_prev.zero();
+        
 }
 
 float
@@ -1070,6 +1116,29 @@ MulticopterTrajectoryControl::hold_position()
     // set position derivatives to zero
     _vel_nom.zero();
     _acc_nom.zero();
+    _jerk_nom.zero();
+    _snap_nom.zero();
+    _psi1_nom = 0.0f;
+    _psi2_nom = 0.0f;
+    
+    // Force to just couteract gravity
+    _F_nom.zero();
+    _F_nom(2) = -_mass*GRAV;
+    math::Vector<3> x_nom;	x_nom.zero();
+    math::Vector<3> y_nom;	y_nom.zero();
+    math::Vector<3> z_nom;	z_nom.zero();
+    float uT1_nom = 0.0f;
+    math::Vector<3> h_Omega; 	h_Omega.zero();
+    force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
+                    _uT_nom, uT1_nom, _Omg_nom, h_Omega,
+                    _F_nom, _psi_nom, _psi1_nom); 
+    
+    // zero angular rates
+    _Omg_nom.zero();
+   
+    
+    // nominally no moment
+    _M_nom.zero();
         
 }
 
@@ -1153,6 +1222,8 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _acc_nom(1) = poly_eval(_ya_coefs.at(cur_seg), cur_poly_t);
         _acc_nom(2) = poly_eval(_za_coefs.at(cur_seg), cur_poly_t);
         _psi2_nom = poly_eval(_yaw2_coefs.at(cur_seg), cur_poly_t);
+    
+                
 
         // here
     } else {
@@ -1187,10 +1258,34 @@ MulticopterTrajectoryControl::trajectory_transition_pos_vel(float t_trans,
 	_vel_nom(0) = poly_eval(vx_trans_coefs, t_trans);
 	_vel_nom(1) = poly_eval(vy_trans_coefs, t_trans);
 	_vel_nom(2) = poly_eval(vz_trans_coefs, t_trans);
+	_psi1_nom = _yaw1_coefs.at(0).at(0);
 	
     
     // set position derivatives to zero
     _acc_nom.zero();
+    _jerk_nom.zero();
+    _snap_nom.zero();
+    _psi1_nom = 0.0f;
+    _psi2_nom = 0.0f;
+    
+    // Force to just couteract gravity
+    _F_nom.zero();
+    _F_nom(2) = -_mass*GRAV;
+    math::Vector<3> x_nom;	x_nom.zero();
+    math::Vector<3> y_nom;	y_nom.zero();
+    math::Vector<3> z_nom;	z_nom.zero();
+    float uT1_nom = 0.0f;
+    math::Vector<3> h_Omega; 	h_Omega.zero();
+    force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
+                    _uT_nom, uT1_nom, _Omg_nom, h_Omega,
+                    _F_nom, _psi_nom, _psi1_nom); 
+    
+    // zero angular rates
+    _Omg_nom.zero();
+   
+    
+    // nominally no moment
+    _M_nom.zero();
         
 }
 
