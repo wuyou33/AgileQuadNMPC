@@ -276,7 +276,7 @@ public:
 		Matrix<M, P> res;
 		arm_mat_mult_f32(&arm_mat, &m.arm_mat, &res.arm_mat);
 		return res;
-	}
+    }
 
 	/**
 	 * transpose the matrix
@@ -355,7 +355,7 @@ public:
 		Vector<M> res;
 		arm_mat_mult_f32(&this->arm_mat, &v.arm_col, &res.arm_col);
 		return res;
-	}
+    }
 };
 
 template <>
