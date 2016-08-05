@@ -1190,6 +1190,20 @@ void
 MulticopterTrajectoryControl::trajectory_nominal_state(
 	float cur_spline_t, float spline_term_t, int cur_seg, float cur_poly_t, float poly_term_t)
 {
+       
+    // local variables
+    math::Vector<3> x_nom;	x_nom.zero();	/**< nominal body x-axis */
+    math::Vector<3> y_nom;	y_nom.zero();	/**< nominal body x-axis */
+    math::Vector<3> z_nom;	z_nom.zero();	/**< nominal body x-axis */
+    float uT1_nom = 0.0f;	/**< 1st deriv of nominal thrust input */
+    float uT2_nom = 0.0f;	/**< 2nd deriv of nominal thrust input */
+    math::Vector<3> h_Omega; 	h_Omega.zero();
+    math::Vector<3> h_alpha;	h_alpha.zero();
+    math::Vector<3> al_nom;		al_nom.zero();
+    math::Vector<3> z_W;	z_W.zero();
+    z_W(2) = 1.0f;
+    
+    
     if (cur_spline_t <= 0) {
         
         _pos_nom(0) = poly_eval(_x_coefs.at(0), 0.0f);
@@ -1223,6 +1237,43 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _acc_nom(2) = poly_eval(_za_coefs.at(cur_seg), cur_poly_t);
         _psi2_nom = poly_eval(_yaw2_coefs.at(cur_seg), cur_poly_t);
     
+        // nominal jerk
+        _jerk_nom(0) = poly_eval(_xj_coefs.at(cur_seg), cur_poly_t);
+        _jerk_nom(1) = poly_eval(_yj_coefs.at(cur_seg), cur_poly_t);
+        _jerk_nom(2) = poly_eval(_zj_coefs.at(cur_seg), cur_poly_t);
+        
+        // nominal snap
+        _snap_nom(0) = poly_eval(_xs_coefs.at(cur_seg), cur_poly_t);
+        _snap_nom(1) = poly_eval(_ys_coefs.at(cur_seg), cur_poly_t);
+        _snap_nom(2) = poly_eval(_zs_coefs.at(cur_seg), cur_poly_t);
+        
+        // nominal force in world frame (eqn 16)
+        _F_nom = _acc_nom*_mass - z_W*(_mass*GRAV);
+        if (_F_nom(2) > 0.0f || _F_nom.length()/_mass < _safe_params.freefall_thresh) {
+            // stabilize min thrust "free fall"
+            _F_nom.zero();
+            _F_nom(2) = -_safe_params.thrust_min;
+        }
+        
+        // nominal thrust, orientation, and angular velocity
+        force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
+            _uT_nom, uT1_nom, _Omg_nom, h_Omega,
+            _F_nom, _psi_nom, _psi1_nom);
+        
+        
+        // nominal angular acceleration
+        uT2_nom = -dot(_snap_nom*_mass + cross(
+            _Omg_nom, cross(_Omg_nom, z_nom)), z_nom);
+        h_alpha = -(_snap_nom*_mass + z_nom*uT2_nom + cross(_Omg_nom, z_nom)*2.0f*uT1_nom + 
+            cross(_Omg_nom, cross(_Omg_nom, z_nom)))*(1.0f/_uT_nom);
+        al_nom(0) = -dot(h_alpha, y_nom);
+        al_nom(1) = dot(h_alpha, x_nom);
+        al_nom(2) = dot(z_nom*_psi2_nom - h_Omega*_psi1_nom, z_W);
+        
+        // nominal moment input
+        math::Matrix<3, 3> R_W2B = _R_B2W.transposed();
+        _M_nom = _J_B*(R_W2B*_R_N2W*al_nom - cross(_Omg_body, R_W2B*_R_N2W*_Omg_nom)) +
+            cross(_Omg_body, _J_B*_Omg_body);
                 
 
         // here
