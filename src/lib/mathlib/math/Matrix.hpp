@@ -114,6 +114,25 @@ public:
 		memcpy(data, d, sizeof(data));
 	}
 
+    /**
+     * set row from vector
+     */
+    void set_row(unsigned int row, const Vector<N> v) {
+        for (unsigned i = 0; i < N; i++) {
+            data[row][i] = v.data[i];
+        }
+    }
+
+    /**
+     * set column from vector
+     */
+    void set_col(unsigned int col, const Vector<M> v) {
+        for (unsigned i = 0; i < M; i++) {
+            data[i][col] = v.data[i];
+        }
+    }
+
+
 	/**
 	 * access by index
 	 */
