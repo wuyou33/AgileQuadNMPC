@@ -214,6 +214,7 @@ private:
     bool _reset_psi_nom;
     bool _control_trajectory_started;
     bool _entered_trajectory_feedback_controller;
+    bool _started_feedback;
     //~ bool _obs_force_timed_out;
     
     //NOTE: ELIMINATE VARIABLES THAT ARE PASSED AROUND 
@@ -228,6 +229,8 @@ private:
     math::Vector<3> _y_body;	/**< y-axis of body frame in world coords */
     math::Vector<3> _z_body;	/**< z-axis of body frame in world coords */
     math::Vector<3> _Omg_body;	/**< angular velocity of body frame wrt world, in body frame */
+    math::Vector<3> _Euler_angles;
+    math::Vector<3> _Euler_rates;
     
     /* error terms for integral and derivative control */
     math::Vector<3> _omg_err_prev;  /**< angular velocity previous error */
@@ -246,6 +249,9 @@ private:
     float _psi2_nom;		/**< nominal yaw 2nd derivative*/
     math::Matrix<3, 3> _R_N2W;		/**< rotation matrix from nominal to world frame */
     math::Vector<3> _Omg_nom;		/**< nominal angular velocity wrt to world, expressed in nominal */
+    math::Vector<3> _Euler_des;
+    math::Vector<3> _Euler_rate_des;
+
     math::Vector<3> _F_nom;			/**< nominal force expressed in world coords */
     math::Vector<3> _F_cor;			/**< corrective force in world coords */
     float			_uT_nom;		/**< nominal thrust setpoint */
@@ -257,9 +263,15 @@ private:
 
     /* Used in trajectory feedback controller */
     math::Vector<3> _u_prev;
-    math::Vector<3> _att_des_prev;
+    math::Vector<3> _Euler_des_prev;
     math::Vector<3> _om_des_prev;
+
+    float _kx;
+    float _kv;
     
+    math::Matrix<6,6> _Mq;
+    math::Matrix<6,3> _B_rot;
+
     //int _n_spline_seg;      /** < number of segments in spline (not max number, necassarily) */
     
     /* Dynamical properties of quadrotor*/
@@ -392,27 +404,32 @@ private:
     /**
      * Set position setpoint using trajectory control - Ross Allen
      */
-    void        trajectory_nominal_state(float cur_spline_t, float spline_term_t, int cur_seg, float cur_poly_t, float poly_term_t);
+    void        trajectory_nominal_state(float cur_spline_t, float spline_term_t, int cur_seg, float cur_poly_t, float poly_term_t, float dt);
     void		trajectory_transition_pos_vel(float t_trans, const std::vector<float>& x_trans_coefs, const std::vector<float>& y_trans_coefs, const std::vector<float>& z_trans_coefs,
-					const std::vector<float>& vx_trans_coefs, const std::vector<float>& vy_trans_coefs, const std::vector<float>& vz_trans_coefs );
-    void		dual_trajectory_transition_nominal_state( float cur_spline_t, int cur_seg, float cur_poly_t, 
-					float prev_spline_t, int prev_seg, float prev_poly_t);
-    void		trajectory_feedback_controller(math::Vector<12> x_nom, math::Vector<12> x_act, math::Vector<3> accel, float dt);
+					const std::vector<float>& vx_trans_coefs, const std::vector<float>& vy_trans_coefs, const std::vector<float>& vz_trans_coefs,
+					const float dt);
+    //void		dual_trajectory_transition_nominal_state( float cur_spline_t, int cur_seg, float cur_poly_t,
+    //				float prev_spline_t, int prev_seg, float prev_poly_t);
+    void		trajectory_feedback_controller();
+
+
+    // One-step prediction for feedback controller initial step
+    void 		feedback_fwd(math::Vector<3> pos_nom_next, math::Vector<3> vel_nom_next, math::Vector<3> acc_nom_next, float psi_nom_next,
+    			const float dt, math::Vector<3>& Euler_rate_s, math::Vector<3>& Om_s);
 
     math::Matrix<3, 3>              R_om(math::Vector<3> x);
-    float                           bq_1(math::Vector<12> x);
-    float                           bq_2(math::Vector<12> x);
-    float                           bq_3(math::Vector<12> x);
-    math::Matrix<3, 3>              rotation_matrix(double z, double y, double x);
+    float                           bq_1(math::Vector<3> x);
+    float                           bq_2(math::Vector<3> x);
+    float                           bq_3(math::Vector<3> x);
     math::Matrix<6, 6>              phi_d(math::Vector<6> x);
     math::Matrix<6, 6>              M(math::Vector<6> x);
     math::Vector<6>                 f_rot(math::Vector<6>);
 
     void        reset_trajectory();
-    void		hold_position();
-    void		force_orientation_mapping(math::Matrix<3,3>& R_S2W, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
-                    float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& h_Omega,
-                    const math::Vector<3>& F_s, const float psi_s, const float psi1_s);
+    void		hold_position(const float dt);
+    void		force_orientation_mapping(math::Matrix<3,3>& R_S2W, math::Vector<3>& Euler_s, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
+                    float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& Euler_rate_s,
+                    math::Vector<3>& h_Omega,const math::Vector<3>& F_s, const float psi_s, const math::Vector<3>& Euler_s_prev, const float dt);
     
     /**
      * Evaluate polynomials
@@ -541,6 +558,9 @@ MulticopterTrajectoryControl::MulticopterTrajectoryControl() :
     _safe_params.ang_int_limit(1) = TRAJ_PARAMS_RP_INT_LIMIT;
     _safe_params.ang_int_limit(2) = TRAJ_PARAMS_YAW_INT_LIMIT;
     
+    _entered_trajectory_feedback_controller = false;
+    _started_feedback = false;
+
     _pos.zero();
     _vel.zero();
     _R_B2W.identity();
@@ -548,6 +568,9 @@ MulticopterTrajectoryControl::MulticopterTrajectoryControl() :
     _y_body.zero();	_y_body(1) = 1.0f;
     _z_body.zero(); _z_body(2) = 1.0f;
     _Omg_body.zero();
+    _Euler_angles.zero();
+    _Euler_rates.zero();
+
     //~ _R_P2W.identity();
     //~ _R_B2P.identity();
     //~ _R_B2P(0,0) = (float)cos(M_PI_4);
@@ -569,7 +592,20 @@ MulticopterTrajectoryControl::MulticopterTrajectoryControl() :
     _psi1_nom = 0.0f;
     _psi2_nom = 0.0f;
     _R_N2W.identity();
+
     _Omg_nom.zero();
+    _Euler_des.zero();
+    _Euler_rate_des.zero();
+
+    _u_prev.zero();
+    _Euler_des_prev.zero();
+    _om_des_prev.zero();
+
+    _kx = 0.0f;
+    _kv = 0.0f;
+    _Mq.identity();
+    _B_rot.zero();
+
     _F_nom.zero();
     _F_cor.zero();
     _uT_nom = 0.0f;
@@ -638,24 +674,16 @@ MulticopterTrajectoryControl::poll_subscriptions(hrt_abstime t)
             _y_body(i) = _R_B2W(i,1);
             _z_body(i) = _R_B2W(i,2);
         }
-        
-        //~ math::Vector<3> ang_rates;	ang_rates.zero();
-        //~ ang_rates(0) = _att.rollspeed;
-        //~ ang_rates(1) = _att.pitchspeed;
-        //~ ang_rates(2) = _att.yawspeed;
-        //~ math::Matrix<3, 3> T_dot2omg;	T_dot2omg.zero();
-        //~ T_dot2omg(0, 0) = (float)cos((double) _att.pitch);
-        //~ T_dot2omg(0, 2) = -(float)(cos((double) _att.roll)*sin((double) _att.pitch));
-        //~ T_dot2omg(1, 1) = 1.0f;
-        //~ T_dot2omg(1, 2) = (float)sin((double) _att.roll);
-        //~ T_dot2omg(2, 0) = (float)sin((double) _att.pitch);
-        //~ T_dot2omg(2, 2) = (float)(cos((double) _att.roll)*cos((double) _att.pitch));
-        //~ math::Vector<3> Omg_px4 = T_dot2omg*ang_rates;
-        //~ _Omg_body = _R_B2P.transposed()*Omg_px4;
-        //~ _Omg_body = T_dot2omg*ang_rates;
-        _Omg_body(0) = _att.rollspeed;
-        _Omg_body(1) = _att.pitchspeed;
-        _Omg_body(2) = _att.yawspeed;
+
+        _Euler_angles(0) = _att.roll;
+        _Euler_angles(1) = _att.pitch;
+        _Euler_angles(2) = _att.yaw;
+
+        _Euler_rates(0) = _att.rollspeed;
+        _Euler_rates(1) = _att.pitchspeed;
+        _Euler_rates(2) = _att.yawspeed;
+
+        _Omg_body = R_om(_Euler_angles)*_Euler_rates;
     }
 
     orb_check(_control_mode_sub, &updated);
@@ -897,7 +925,11 @@ MulticopterTrajectoryControl::reset_trajectory()
     _x_body.zero();	_x_body(0) = 1.0f;
     _y_body.zero();	_y_body(1) = 1.0f;
     _z_body.zero(); _z_body(2) = 1.0f;
+
     _Omg_body.zero();
+    _Euler_angles.zero();
+    _Euler_rates.zero();
+
     _pos_nom.zero();
     _vel_nom.zero();
     _acc_nom.zero();
@@ -907,7 +939,18 @@ MulticopterTrajectoryControl::reset_trajectory()
     _psi1_nom = 0.0f;
     _psi2_nom = 0.0f;
     _R_N2W.identity();
+
     _Omg_nom.zero();
+    _Euler_des.zero();
+    _Euler_rate_des.zero();
+
+    _entered_trajectory_feedback_controller = false;
+    _started_feedback = false;
+
+    _u_prev.zero();
+    _Euler_des_prev.zero();
+    _om_des_prev.zero();
+
     _F_nom.zero();
     _F_cor.zero();
     _uT_nom = 0.0f;
@@ -953,33 +996,6 @@ MulticopterTrajectoryControl::poly_eval(const std::vector<float>& coefs, float t
 
     return p;
 }
-
-//~ float
-//~ MulticopterTrajectoryControl::spline_eval(const std::vector<float>& spline, int seg, int nCoef, float t)
-//~ {
-	//~ int deg = nCoef - 1;	// degree of polynomial
-//~ 
-	//~ // base of iterator
-	//~ int base_iter = seg*nCoef;
-    //~ 
-    //~ // initialize return value
-    //~ float p = coefs.at(seg*nCoef + deg);
-    //~ 
-    //~ for(int i = deg-1; ; --i){
-        //~ 
-        //~ // Calculate with Horner's Rule
-        //~ p = p*t + coefs.at(base_iter + i);
-        //~ 
-        //~ // Check break condition.
-        //~ // This clunky for a for loop but is necessary because vecf_sz
-        //~ // in some form of unsigned int. If the condition is left as
-        //~ // i >= 0, then the condition is always true
-        //~ if (i == 0) break;
-    //~ }
-//~ 
-    //~ return p;
-	//~ 
-//~ }
 
 float
 MulticopterTrajectoryControl::poly_eval(const float coefs_arr[N_POLY_COEFS], float t)
@@ -1069,32 +1085,45 @@ const std::vector<float>& poly, std::vector<float>& deriv) {
     
 }
 
-/* Evaluate derivatives of a polynomial */
-//~ void
-//~ MulticopterTrajectoryControl::poly_deriv(
-//~ const std::vector<float>& poly, std::vector<float>& deriv, int nSeg, int nCoef)
-//~ {    
-    //~ deriv.resize(nSeg*(nCoef-1));      // resize number rows
-//~ 
-    //~ 
-    //~ for (int seg = 0; seg != nSeg; ++seg) {
-		//~ 
-		//~ // base iterator
-		//~ int deriv_base_iter = seg*(nCoef-1);
-		//~ int poly_base_iter = seg*nCoef;
-        //~ 
-        //~ for (int deriv_coef = 0; deriv_coef != nCoef-1; ++deriv_coef) {
-            //~ poly_coef = deriv_coef+1;
-            //~ deriv.at(deriv_base_iter + deriv_coef) = ((float)poly_coef)*poly.at(poly_base_iter + poly_coef);
-        //~ }
-        //~ 
-    //~ }
-    //~ 
-//~ }
+void
+MulticopterTrajectoryControl::feedback_fwd(math::Vector<3> pos_nom_next, math::Vector<3> vel_nom_next, math::Vector<3> acc_nom_next, float psi_nom_next,
+		const float dt, math::Vector<3>& Euler_rate_s, math::Vector<3>& Om_s)
+{
+
+	math::Vector<3> z_W;	z_W.zero();
+	z_W(2) = 1.0f;
+
+	math::Vector<3> bq_temp({ bq_1(_Euler_angles), bq_2(_Euler_angles), bq_3(_Euler_angles) });
+	math::Vector<3> a_pred = z_W*GRAV + bq_temp*_uT_nom*((float)-1.0 / _mass);
+	math::Vector<3> x_pred = _pos + _vel * dt;
+	math::Vector<3> v_pred = _vel + a_pred * dt;
+
+	math::Vector<3> err_x_pred = x_pred - pos_nom_next;
+	math::Vector<3> err_v_pred = v_pred - vel_nom_next;
+
+	math::Vector<3> a_des = acc_nom_next;
+
+	math::Vector<3> F_next = -err_x_pred *_kx - err_v_pred * _kv - z_W*_mass*GRAV + a_des*_mass;
+
+	math::Vector<3> Euler_des_next = _Euler_des; // just for initialization
+
+	math::Vector<3> z_s_next = -F_next.normalized();	// (eqn 15)
+
+	float yaw_des_next = psi_nom_next;
+	float pitch_des_next = atan2((z_s_next(0) * (float)cos(yaw_des_next) + z_s_next(1) * (float)sin(yaw_des_next)), (z_s_next(2)));
+	float roll_des_next = atan2(z_s_next(0) * (float)sin(yaw_des_next) - z_s_next(1) * (float)cos(yaw_des_next), z_s_next(2) / (float)cos(pitch_des_next));
+
+	Euler_des_next(0) = roll_des_next;
+	Euler_des_next(1) = pitch_des_next;
+	Euler_des_next(2) = yaw_des_next;
+
+	Euler_rate_s = (Euler_des_next-_Euler_des)/dt;
+	Om_s = R_om(_Euler_des)*Euler_rate_s;
+}
 
 /* hold position */
 void
-MulticopterTrajectoryControl::hold_position()
+MulticopterTrajectoryControl::hold_position(const float dt)
 {
     // reset position and alt if necessary
     reset_pos_nom();
@@ -1117,66 +1146,76 @@ MulticopterTrajectoryControl::hold_position()
     math::Vector<3> z_nom;	z_nom.zero();
     float uT1_nom = 0.0f;
     math::Vector<3> h_Omega; 	h_Omega.zero();
-    force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-                    _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-                    _F_nom, _psi_nom, _psi1_nom); 
-    
-    // zero angular rates
-    _Omg_nom.zero();
+    force_orientation_mapping(_R_N2W,_Euler_des, x_nom, y_nom, z_nom,
+                    _uT_nom, uT1_nom, _Omg_nom, _Euler_rate_des, h_Omega,
+                    _F_nom, _psi_nom, _Euler_des_prev, dt);
    
+    math::Vector<3> ang_a; ang_a.zero();
+    if (_started_feedback || _entered_trajectory_feedback_controller){
+    	// can trust _Omg_nom & _Euler_rate_des from orientation mapping
+		ang_a = (_Omg_nom - _om_des_prev)/dt;
+    } else {
+    	_started_feedback = true;
+
+    	math::Vector<3> pos_nom_next = _pos_nom;
+    	math::Vector<3> vel_nom_next = _vel_nom;
+    	math::Vector<3> acc_nom_next = _acc_nom;
+    	float psi_nom_next = _psi_nom;
+    	feedback_fwd(pos_nom_next,vel_nom_next,acc_nom_next,psi_nom_next,dt,_Euler_rate_des,_Omg_nom);
+    	ang_a.zero();
+    }
     
-    // nominally no moment
-    _M_nom.zero();
+    // nominal moment input
+	_M_nom = _J_B*ang_a + cross(_Omg_nom, _J_B*_Omg_nom);
+
+	// Update previous
+	_om_des_prev = _Omg_nom;
+	_Euler_des_prev = _Euler_des;
         
 }
 
 /* Calculate thrust input, orientation matrix and angular velocity based on a force vector */
 void
 MulticopterTrajectoryControl::force_orientation_mapping(
-        math::Matrix<3,3>& R_S2W, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
-        float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& h_Omega,
-        const math::Vector<3>& F_s, const float psi_s, const float psi1_s)
+        math::Matrix<3,3>& R_S2W, math::Vector<3>& Euler_s, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
+        float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& Euler_rate_s, math::Vector<3>& h_Omega,
+        const math::Vector<3>& F_s, const float psi_s, const math::Vector<3>& Euler_s_prev,
+        const float dt)
 {
-    
-        // intermediate vector
-        math::Vector<3> y_mid;
-        y_mid.zero();
-        
+
         // nominal thrust input
         uT_s = -dot(_z_body, F_s);
-        //~ uT_s = F_s.length();
         
         // nominal body axis in world frame
         z_s = -F_s.normalized();	// (eqn 15)
-        y_mid(0) = -(float)sin((double)(psi_s));
-        y_mid(1) = (float)cos((double)(psi_s));
-        x_s = cross(y_mid, z_s);
-        if (x_s.length() < _safe_params.gim_lock) {
-            // protect against gimbal lock by artifically changing yaw by small amount
-            y_mid(0) = -(float)sin((double)(psi_s) + asin((double)_safe_params.gim_lock));
-            y_mid(1) = (float)cos((double)(psi_s) + asin((double)_safe_params.gim_lock));
+
+        //TODO: put gimbal lock check here
+
+        float yaw_des = psi_s;
+        float pitch_des = atan2((z_s(0) * (float)cos(yaw_des) + z_s(1) * (float)sin(yaw_des)), (z_s(2)));
+        float roll_des = atan2(z_s(0) * (float)sin(yaw_des) - z_s(1) * (float)cos(yaw_des), z_s(2) / (float)cos(pitch_des));
+
+        Euler_s(0) = roll_des; Euler_s(1) = pitch_des; Euler_s(2) = yaw_des;
+
+        R_S2W.from_euler(roll_des,pitch_des,yaw_des);
+        for (int i=0;i<3;i++){
+        	x_s(i) = R_S2W(i,0);
+        	y_s(i) = R_S2W(i,1);
         }
         
-        /* check for nearest valid orientation to avoid erratic behavior */
-        x_s.normalize();
-        y_s = cross(z_s, x_s);
-        set_column(R_S2W, 0, x_s);
-        set_column(R_S2W, 1, y_s);
-        set_column(R_S2W, 2, z_s);      
-        
+        Euler_rate_s = (Euler_s - Euler_s_prev)/dt;
+
         // nominal angular velocity
         uT1_s = -_mass*dot(_jerk_nom, z_s);
         h_Omega = -(z_s*uT1_s + _jerk_nom*_mass)*(1.0f/uT_s);
-        Om_s(0) = -dot(h_Omega, y_s);
-        Om_s(1) = dot(h_Omega, x_s);
-        Om_s(2) = psi1_s*z_s(2);
 
+        Om_s = R_om(Euler_s)*Euler_rate_s;
 }
 
 /* Calculate the nominal state variables for the trajectory at the current time */
 void
 MulticopterTrajectoryControl::trajectory_nominal_state(
-	float cur_spline_t, float spline_term_t, int cur_seg, float cur_poly_t, float poly_term_t)
+	float cur_spline_t, float spline_term_t, int cur_seg, float cur_poly_t, float poly_term_t, float dt)
 {
        
     // local variables
@@ -1184,10 +1223,7 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
     math::Vector<3> y_nom;	y_nom.zero();	/**< nominal body x-axis */
     math::Vector<3> z_nom;	z_nom.zero();	/**< nominal body x-axis */
     float uT1_nom = 0.0f;	/**< 1st deriv of nominal thrust input */
-    float uT2_nom = 0.0f;	/**< 2nd deriv of nominal thrust input */
     math::Vector<3> h_Omega; 	h_Omega.zero();
-    math::Vector<3> h_alpha;	h_alpha.zero();
-    math::Vector<3> al_nom;		al_nom.zero();
     math::Vector<3> z_W;	z_W.zero();
     z_W(2) = 1.0f;
     
@@ -1203,7 +1239,7 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _reset_alt_nom = false;
         _reset_psi_nom = false;
         
-        hold_position();
+        hold_position(dt);
         
     } else if (cur_spline_t > 0 && cur_spline_t < spline_term_t) {
     
@@ -1211,32 +1247,24 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _pos_nom(0) = poly_eval(_x_coefs.at(cur_seg), cur_poly_t);
         _pos_nom(1) = poly_eval(_y_coefs.at(cur_seg), cur_poly_t);
         _pos_nom(2) = poly_eval(_z_coefs.at(cur_seg), cur_poly_t);
-        _psi_nom = poly_eval(_yaw_coefs.at(cur_seg), cur_poly_t);
         
         // nominal velocity
         _vel_nom(0) = poly_eval(_xv_coefs.at(cur_seg), cur_poly_t);
         _vel_nom(1) = poly_eval(_yv_coefs.at(cur_seg), cur_poly_t);
         _vel_nom(2) = poly_eval(_zv_coefs.at(cur_seg), cur_poly_t);
-        _psi1_nom = poly_eval(_yaw1_coefs.at(cur_seg), cur_poly_t);
         
         // nominal acceleration
         _acc_nom(0) = poly_eval(_xa_coefs.at(cur_seg), cur_poly_t);
         _acc_nom(1) = poly_eval(_ya_coefs.at(cur_seg), cur_poly_t);
         _acc_nom(2) = poly_eval(_za_coefs.at(cur_seg), cur_poly_t);
-        _psi2_nom = poly_eval(_yaw2_coefs.at(cur_seg), cur_poly_t);
-    
-        // nominal jerk
-        _jerk_nom(0) = poly_eval(_xj_coefs.at(cur_seg), cur_poly_t);
-        _jerk_nom(1) = poly_eval(_yj_coefs.at(cur_seg), cur_poly_t);
-        _jerk_nom(2) = poly_eval(_zj_coefs.at(cur_seg), cur_poly_t);
-        
-        // nominal snap
-        _snap_nom(0) = poly_eval(_xs_coefs.at(cur_seg), cur_poly_t);
-        _snap_nom(1) = poly_eval(_ys_coefs.at(cur_seg), cur_poly_t);
-        _snap_nom(2) = poly_eval(_zs_coefs.at(cur_seg), cur_poly_t);
+
         
         // nominal force in world frame (eqn 16)
-        _F_nom = _acc_nom*_mass - z_W*(_mass*GRAV);
+        math::Vector<3> ex = _pos - _pos_nom;
+        math::Vector<3> ev = _vel - _vel_nom;
+
+        _F_nom = _acc_nom*_mass - z_W*(_mass*GRAV) - ex*_kx - ev*_kv;
+
         if (_F_nom(2) > 0.0f || _F_nom.length()/_mass < _safe_params.freefall_thresh) {
             // stabilize min thrust "free fall"
             _F_nom.zero();
@@ -1244,27 +1272,33 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         }
         
         // nominal thrust, orientation, and angular velocity
-        force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-            _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-            _F_nom, _psi_nom, _psi1_nom);
-        
+        force_orientation_mapping(_R_N2W,_Euler_des, x_nom, y_nom, z_nom,
+                            _uT_nom, uT1_nom, _Omg_nom, _Euler_rate_des, h_Omega,
+                            _F_nom, _psi_nom, _Euler_des_prev, dt);
         
         // nominal angular acceleration
-        uT2_nom = -dot(_snap_nom*_mass + cross(
-            _Omg_nom, cross(_Omg_nom, z_nom)), z_nom);
-        h_alpha = -(_snap_nom*_mass + z_nom*uT2_nom + cross(_Omg_nom, z_nom)*2.0f*uT1_nom + 
-            cross(_Omg_nom, cross(_Omg_nom, z_nom)))*(1.0f/_uT_nom);
-        al_nom(0) = -dot(h_alpha, y_nom);
-        al_nom(1) = dot(h_alpha, x_nom);
-        al_nom(2) = dot(z_nom*_psi2_nom - h_Omega*_psi1_nom, z_W);
-        
-        // nominal moment input
-        math::Matrix<3, 3> R_W2B = _R_B2W.transposed();
-        _M_nom = _J_B*(R_W2B*_R_N2W*al_nom - cross(_Omg_body, R_W2B*_R_N2W*_Omg_nom)) +
-            cross(_Omg_body, _J_B*_Omg_body);
-                
+        math::Vector<3> ang_a; ang_a.zero();
+		if (_entered_trajectory_feedback_controller){
+			// can trust _Omg_nom & _Euler_rate_des from orientation mapping
+			ang_a = (_Omg_nom - _om_des_prev)/dt;
+		} else {
+			_entered_trajectory_feedback_controller = true;
+			// TODO: update next vars
+			math::Vector<3> pos_nom_next = _pos_nom;
+			math::Vector<3> vel_nom_next = _vel_nom;
+			math::Vector<3> acc_nom_next = _acc_nom;
+			float psi_nom_next = _psi_nom;
+			feedback_fwd(pos_nom_next,vel_nom_next,acc_nom_next,psi_nom_next,dt,_Euler_rate_des,_Omg_nom);
+			ang_a.zero();
+		}
 
-        // here
+        // nominal moment input
+        _M_nom = _J_B*ang_a + cross(_Omg_nom, _J_B*_Omg_nom);
+
+        // Update previous
+        _om_des_prev = _Omg_nom;
+        _Euler_des_prev = _Euler_des;
+
     } else {
         
         _pos_nom(0) = poly_eval(_x_coefs.at(_x_coefs.size()-1), poly_term_t);
@@ -1276,7 +1310,7 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
         _reset_alt_nom = false;
         _reset_psi_nom = false;
         
-        hold_position();
+        hold_position(dt);
     }
     
 }
@@ -1285,8 +1319,17 @@ MulticopterTrajectoryControl::trajectory_nominal_state(
 void
 MulticopterTrajectoryControl::trajectory_transition_pos_vel(float t_trans,
 	const std::vector<float>& x_trans_coefs, const std::vector<float>& y_trans_coefs, const std::vector<float>& z_trans_coefs,
-	const std::vector<float>& vx_trans_coefs, const std::vector<float>& vy_trans_coefs, const std::vector<float>& vz_trans_coefs )
+	const std::vector<float>& vx_trans_coefs, const std::vector<float>& vy_trans_coefs, const std::vector<float>& vz_trans_coefs,
+	const float dt)
 {
+	// local variables
+	math::Vector<3> x_nom;	x_nom.zero();	/**< nominal body x-axis */
+	math::Vector<3> y_nom;	y_nom.zero();	/**< nominal body x-axis */
+	math::Vector<3> z_nom;	z_nom.zero();	/**< nominal body x-axis */
+	float uT1_nom = 0.0f;	/**< 1st deriv of nominal thrust input */
+	math::Vector<3> h_Omega; 	h_Omega.zero();
+	math::Vector<3> z_W;	z_W.zero();
+	z_W(2) = 1.0f;
 	
 	// calculate setpoint in transition
 	_pos_nom(0) = poly_eval(x_trans_coefs, t_trans);
@@ -1297,298 +1340,50 @@ MulticopterTrajectoryControl::trajectory_transition_pos_vel(float t_trans,
 	_vel_nom(0) = poly_eval(vx_trans_coefs, t_trans);
 	_vel_nom(1) = poly_eval(vy_trans_coefs, t_trans);
 	_vel_nom(2) = poly_eval(vz_trans_coefs, t_trans);
-	_psi1_nom = _yaw1_coefs.at(0).at(0);
 	
     
-    // set position derivatives to zero
-    _acc_nom.zero();
-    _jerk_nom.zero();
-    _snap_nom.zero();
-    _psi1_nom = 0.0f;
-    _psi2_nom = 0.0f;
-    
-    // Force to just counteract gravity
-    _F_nom.zero();
-    _F_nom(2) = -_mass*GRAV;
-    math::Vector<3> x_nom;	x_nom.zero();
-    math::Vector<3> y_nom;	y_nom.zero();
-    math::Vector<3> z_nom;	z_nom.zero();
-    float uT1_nom = 0.0f;
-    math::Vector<3> h_Omega; 	h_Omega.zero();
-    force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-                    _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-                    _F_nom, _psi_nom, _psi1_nom); 
-    
-    // zero angular rates
-    _Omg_nom.zero();
-   
-    
-    // nominally no moment
-    _M_nom.zero();
-        
-}
-
-void
-MulticopterTrajectoryControl::dual_trajectory_transition_nominal_state(
-	float cur_spline_t, int cur_seg, float cur_poly_t, 
-	float prev_spline_t, int prev_seg, float prev_poly_t)
-{
-	
-	// local variables
-    math::Vector<3> x_nom;	x_nom.zero();	/**< nominal body x-axis */
-    math::Vector<3> y_nom;	y_nom.zero();	/**< nominal body x-axis */
-    math::Vector<3> z_nom;	z_nom.zero();	/**< nominal body x-axis */
-    float uT1_nom = 0.0f;	/**< 1st deriv of nominal thrust input */
-    //~ float uT2_nom = 0.0f;	/**< 2nd deriv of nominal thrust input */
-    math::Vector<3> h_Omega; 	h_Omega.zero();
-    math::Vector<3> h_alpha;	h_alpha.zero();
-    math::Vector<3> al_nom;		al_nom.zero();
-    math::Vector<3> z_W;	z_W.zero();
-    z_W(2) = 1.0f;
-	
-	// transition parameter
-	float tau = cur_spline_t/SPLINE_TRANS_T_SEC_REL;
-	
-	// nominal position
-	float x_prev = poly_eval(_prev_x_coefs.at(prev_seg), prev_poly_t);
-	float x_cur = poly_eval(_x_coefs.at(cur_seg), cur_poly_t);
-	float y_prev = poly_eval(_prev_y_coefs.at(prev_seg), prev_poly_t);
-	float y_cur = poly_eval(_y_coefs.at(cur_seg), cur_poly_t);
-	float z_prev = poly_eval(_prev_z_coefs.at(prev_seg), prev_poly_t);
-	float z_cur = poly_eval(_z_coefs.at(cur_seg), cur_poly_t);
-	float psi_prev = poly_eval(_prev_yaw_coefs.at(prev_seg), prev_poly_t);
-	float psi_cur = poly_eval(_yaw_coefs.at(cur_seg), cur_poly_t);
-	_pos_nom(0) = tau*(x_cur - x_prev) + x_prev;
-	_pos_nom(1) = tau*(y_cur - y_prev) + y_prev;
-	_pos_nom(2) = tau*(z_cur - z_prev) + z_prev;
-	_psi_nom = tau*(psi_cur - psi_prev) + psi_prev;
-	
-	// nominal velocity
-	float xv_prev = poly_eval(_prev_xv_coefs.at(prev_seg), prev_poly_t);
-	float xv_cur = poly_eval(_xv_coefs.at(cur_seg), cur_poly_t);
-	float yv_prev = poly_eval(_prev_yv_coefs.at(prev_seg), prev_poly_t);
-	float yv_cur = poly_eval(_yv_coefs.at(cur_seg), cur_poly_t);
-	float zv_prev = poly_eval(_prev_zv_coefs.at(prev_seg), prev_poly_t);
-	float zv_cur = poly_eval(_zv_coefs.at(cur_seg), cur_poly_t);
-	float psi1_prev = poly_eval(_prev_yaw1_coefs.at(prev_seg), prev_poly_t);
-	float psi1_cur = poly_eval(_yaw1_coefs.at(cur_seg), cur_poly_t);
-	_vel_nom(0) = tau*(xv_cur - xv_prev) + xv_prev;
-	_vel_nom(1) = tau*(yv_cur - yv_prev) + yv_prev;
-	_vel_nom(2) = tau*(zv_cur - zv_prev) + zv_prev;
-	_psi1_nom = tau*(psi1_cur - psi1_prev) + psi1_prev;
-	//~ _vel_nom(0) = 1.0f*(x_cur-x_prev)/SPLINE_TRANS_T_SEC_REL + tau*(xv_cur-xv_prev) + xv_prev;
-	//~ _vel_nom(1) = 1.0f*(y_cur-y_prev)/SPLINE_TRANS_T_SEC_REL + tau*(yv_cur-yv_prev) + yv_prev;
-	//~ _vel_nom(2) = 1.0f*(z_cur-z_prev)/SPLINE_TRANS_T_SEC_REL + tau*(zv_cur-zv_prev) + zv_prev;
-	//~ _psi1_nom = 1.0f*(psi_cur-psi_prev)/SPLINE_TRANS_T_SEC_REL + tau*(psi1_cur-psi1_prev) + psi1_prev;
-	
-	// nominal acceleration
-	float xa_prev = poly_eval(_prev_xa_coefs.at(prev_seg), prev_poly_t);
-	float xa_cur = poly_eval(_xa_coefs.at(cur_seg), cur_poly_t);
-	float ya_prev = poly_eval(_prev_ya_coefs.at(prev_seg), prev_poly_t);
-	float ya_cur = poly_eval(_ya_coefs.at(cur_seg), cur_poly_t);
-	float za_prev = poly_eval(_prev_za_coefs.at(prev_seg), prev_poly_t);
-	float za_cur = poly_eval(_za_coefs.at(cur_seg), cur_poly_t);
-	float psi2_prev = poly_eval(_prev_yaw2_coefs.at(prev_seg), prev_poly_t);
-	float psi2_cur = poly_eval(_yaw2_coefs.at(cur_seg), cur_poly_t);
-	_acc_nom(0) = tau*(xa_cur - xa_prev) + xa_prev;
-	_acc_nom(1) = tau*(ya_cur - ya_prev) + ya_prev;
-	_acc_nom(2) = tau*(za_cur - za_prev) + za_prev;
-	_psi2_nom = tau*(psi2_cur - psi2_prev) + psi2_prev;
-	//~ _acc_nom(0) = 2.0f*(xv_cur-xv_prev)/SPLINE_TRANS_T_SEC_REL + tau*(xa_cur-xa_prev) + xa_prev;
-	//~ _acc_nom(1) = 2.0f*(yv_cur-yv_prev)/SPLINE_TRANS_T_SEC_REL + tau*(ya_cur-ya_prev) + ya_prev;
-	//~ _acc_nom(2) = 2.0f*(zv_cur-zv_prev)/SPLINE_TRANS_T_SEC_REL + tau*(za_cur-za_prev) + za_prev;
-	//~ _psi2_nom = 2.0f*(psi1_cur-psi1_prev)/SPLINE_TRANS_T_SEC_REL + tau*(psi2_cur-psi2_prev) + psi2_prev;
-
-	// nominal jerk
-	//~ float xj_prev = poly_eval(_prev_xj_coefs.at(prev_seg), prev_poly_t);
-	//~ float xj_cur = poly_eval(_xj_coefs.at(cur_seg), cur_poly_t);
-	//~ float yj_prev = poly_eval(_prev_yj_coefs.at(prev_seg), prev_poly_t);
-	//~ float yj_cur = poly_eval(_yj_coefs.at(cur_seg), cur_poly_t);
-	//~ float zj_prev = poly_eval(_prev_zj_coefs.at(prev_seg), prev_poly_t);
-	//~ float zj_cur = poly_eval(_zj_coefs.at(cur_seg), cur_poly_t);
-	//~ _jerk_nom(0) = tau*(xj_cur - xj_prev) + xj_prev;
-	//~ _jerk_nom(1) = tau*(yj_cur - yj_prev) + yj_prev;
-	//~ _jerk_nom(2) = tau*(zj_cur - zj_prev) + zj_prev;
-	//~ _jerk_nom(0) = 3.0f*(xa_cur-xa_prev)/SPLINE_TRANS_T_SEC_REL + tau*(xj_cur-xj_prev) + xj_prev;
-	//~ _jerk_nom(1) = 3.0f*(ya_cur-ya_prev)/SPLINE_TRANS_T_SEC_REL + tau*(yj_cur-yj_prev) + yj_prev;
-	//~ _jerk_nom(2) = 3.0f*(za_cur-za_prev)/SPLINE_TRANS_T_SEC_REL + tau*(zj_cur-zj_prev) + zj_prev;
-	
-	// nominal snap
-	//~ float xs_prev = poly_eval(_prev_xs_coefs.at(prev_seg), prev_poly_t);
-	//~ float xs_cur = poly_eval(_xs_coefs.at(cur_seg), cur_poly_t);
-	//~ float ys_prev = poly_eval(_prev_ys_coefs.at(prev_seg), prev_poly_t);
-	//~ float ys_cur = poly_eval(_ys_coefs.at(cur_seg), cur_poly_t);
-	//~ float zs_prev = poly_eval(_prev_zs_coefs.at(prev_seg), prev_poly_t);
-	//~ float zs_cur = poly_eval(_zs_coefs.at(cur_seg), cur_poly_t);
-	//~ _snap_nom(0) = tau*(xs_cur - xs_prev) + xs_prev;
-	//~ _snap_nom(1) = tau*(ys_cur - ys_prev) + ys_prev;
-	//~ _snap_nom(2) = tau*(zs_cur - zs_prev) + zs_prev;
-	//~ _snap_nom(0) = 4.0f*(xj_cur-xj_prev)/SPLINE_TRANS_T_SEC_REL + tau*(xs_cur-xs_prev) + xs_prev;
-	//~ _snap_nom(1) = 4.0f*(yj_cur-yj_prev)/SPLINE_TRANS_T_SEC_REL + tau*(ys_cur-ys_prev) + ys_prev;
-	//~ _snap_nom(2) = 4.0f*(zj_cur-zj_prev)/SPLINE_TRANS_T_SEC_REL + tau*(zs_cur-zs_prev) + zs_prev;
-	
 	// nominal force in world frame (eqn 16)
-	_F_nom = _acc_nom*_mass - z_W*(_mass*GRAV);
+	_acc_nom.zero();
+	math::Vector<3> ex = _pos - _pos_nom;
+	math::Vector<3> ev = _vel - _vel_nom;
+
+	_F_nom = _acc_nom*_mass - z_W*(_mass*GRAV) - ex*_kx - ev*_kv;
+
 	if (_F_nom(2) > 0.0f || _F_nom.length()/_mass < _safe_params.freefall_thresh) {
 		// stabilize min thrust "free fall"
-		_F_nom.zero();
-		_F_nom(2) = -_safe_params.thrust_min;
+	    _F_nom.zero();
+	    _F_nom(2) = -_safe_params.thrust_min;
+	 }
+
+	// nominal thrust, orientation, and angular velocity
+	force_orientation_mapping(_R_N2W,_Euler_des, x_nom, y_nom, z_nom,
+						_uT_nom, uT1_nom, _Omg_nom, _Euler_rate_des, h_Omega,
+						_F_nom, _psi_nom, _Euler_des_prev, dt);
+
+	// nominal angular acceleration
+	math::Vector<3> ang_a; ang_a.zero();
+	if (_entered_trajectory_feedback_controller){
+		// can trust _Omg_nom & _Euler_rate_des from orientation mapping
+		ang_a = (_Omg_nom - _om_des_prev)/dt;
+	} else {
+		_entered_trajectory_feedback_controller = true;
+		// TODO: update next vars
+		math::Vector<3> pos_nom_next = _pos_nom;
+		math::Vector<3> vel_nom_next = _vel_nom;
+		math::Vector<3> acc_nom_next = _acc_nom;
+		float psi_nom_next = _psi_nom;
+		feedback_fwd(pos_nom_next,vel_nom_next,acc_nom_next,psi_nom_next,dt,_Euler_rate_des,_Omg_nom);
+		ang_a.zero();
 	}
-	
-	// zero jerk and snap
-	_jerk_nom.zero();
-    _snap_nom.zero();
-    
-    // zero angular rates
-    _Omg_nom.zero();
-    
-    // Find appropriate orientation 
-    force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-                    _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-                    _F_nom, _psi_nom, _psi1_nom); 
 
-   
-    
-    // nominally no moment
-    _M_nom.zero();
-	
-	//~ // nominal thrust, orientation, and angular velocity
-	//~ force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-		//~ _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-		//~ _F_nom, _psi_nom, _psi1_nom);
-	//~ 
-	//~ 
-	//~ // nominal angular acceleration
-	//~ uT2_nom = -dot(_snap_nom*_mass + cross(
-		//~ _Omg_nom, cross(_Omg_nom, z_nom)), z_nom);
-	//~ h_alpha = -(_snap_nom*_mass + z_nom*uT2_nom + cross(_Omg_nom, z_nom)*2.0f*uT1_nom + 
-		//~ cross(_Omg_nom, cross(_Omg_nom, z_nom)))*(1.0f/_uT_nom);
-	//~ al_nom(0) = -dot(h_alpha, y_nom);
-	//~ al_nom(1) = dot(h_alpha, x_nom);
-	//~ al_nom(2) = dot(z_nom*_psi2_nom - h_Omega*_psi1_nom, z_W);
-	//~ 
-	//~ // nominal moment input
-	//~ math::Matrix<3, 3> R_W2B = _R_B2W.transposed();
-	//~ _M_nom = _J_B*(R_W2B*_R_N2W*al_nom - cross(_Omg_body, R_W2B*_R_N2W*_Omg_nom)) +
-		//~ cross(_Omg_body, _J_B*_Omg_body);
-		
+	// nominal moment input
+	_M_nom = _J_B*ang_a + cross(_Omg_nom, _J_B*_Omg_nom);
+
+	// Update previous
+	_om_des_prev = _Omg_nom;
+	_Euler_des_prev = _Euler_des;
+        
 }
-
-/* Calculate the nominal state variables by blending 2 trajectories */
-//~ void
-//~ MulticopterTrajectoryControl::dual_trajectory_nominal_state(float t, float start_time_1, float start_time_2)
-//~ {
-    //~ 
-    //~ /* TODO: verify this works for single polynomial segment spline */
-    //~ 
-    //~ // determine time in spline trajectory
-    //~ float spline_t_1 = t - start_time_1;
-    //~ float spline_term_t_1 = _spline_cumt_1_sec.at(_spline_cumt_1_sec.size()-1);
-    //~ float spline_t_2 = t - start_time_2;
-    //~ float spline_term_t_2 = _spline_cumt_2_sec.at(_spline_cumt_2_sec.size()-1);
-    //~ 
-    //~ // determine polynomial segment being evaluated
-    //~ std::vector<float>::iterator seg_it_1;
-    //~ seg_it_1 = std::lower_bound(_spline_cumt_1_sec.begin(), 
-        //~ _spline_cumt_1_sec.end(), spline_t_1);
-    //~ int seg_1 = (int)(seg_it_1 - _spline_cumt_1_sec.begin());
-    //~ std::vector<float>::iterator seg_it_2;
-    //~ seg_it_2 = std::lower_bound(_spline_cumt_2_sec.begin(), 
-        //~ _spline_cumt_2_sec.end(), spline_t_2);
-    //~ int seg_2 = (int)(seg_it_2 - _spline_cumt_2_sec.begin());
-    //~ 
-    //~ // determine time in polynomial segment
-    //~ float poly_t_1 = seg_1 == 0 ? spline_t_1 :
-                //~ spline_t_1 - _spline_cumt_1_sec.at(seg_1-1);
-    //~ float poly_term_t_1 = seg_1 == 0 ? 0.0f : _spline_delt_1_sec.at(seg_1-1);
-    //~ float poly_t_2 = seg_2 == 0 ? spline_t_2 :
-                //~ spline_t_2 - _spline_cumt_2_sec.at(seg_2-1);
-    //~ float poly_term_t_2 = seg_2 == 0 ? 0.0f : _spline_delt_2_sec.at(seg_2-1);
-    //~ 
-    //~ 
-    //~ // local variables
-    //~ math::Vector<3> x_nom;	x_nom.zero();	/**< nominal body x-axis */
-    //~ math::Vector<3> y_nom;	y_nom.zero();	/**< nominal body x-axis */
-    //~ math::Vector<3> z_nom;	z_nom.zero();	/**< nominal body x-axis */
-    //~ float uT1_nom = 0.0f;	/**< 1st deriv of nominal thrust input */
-    //~ float uT2_nom = 0.0f;	/**< 2nd deriv of nominal thrust input */
-    //~ math::Vector<3> h_Omega; 	h_Omega.zero();
-    //~ math::Vector<3> h_alpha;	h_alpha.zero();
-    //~ math::Vector<3> al_nom;		al_nom.zero();
-    //~ math::Vector<3> z_W;	z_W.zero();
-    //~ z_W(2) = 1.0f;
-    //~ 
-    //~ // transition weight
-    //~ float tau = spline_t_2/t_trans;
-    //~ 
-		//~ 
-	//~ // nominal position
-	//~ math::Vector<3> traj_1_pos;
-	//~ traj_1_pos(0) = poly_eval(x_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ traj_1_pos(1) = poly_eval(y_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ traj_1_pos(2) = poly_eval(z_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ math::Vector<3> traj_2_pos;
-	//~ pos_1(0) = poly_eval(x_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ pos_1(1) = poly_eval(y_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ pos_1(2) = poly_eval(z_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ _pos_nom(0) = tau*poly_eval(x_2_coefs.at(cur_seg_2), poly_t_2) + (1.0-tau)*poly_eval(x_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ _pos_nom(1) = tau*poly_eval(y_2_coefs.at(cur_seg_2), poly_t_2) + (1.0-tau)*poly_eval(y_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ _pos_nom(2) = tau*poly_eval(z_2_coefs.at(cur_seg_2), poly_t_2) + (1.0-tau)*poly_eval(z_1_coefs.at(cur_seg_1), poly_t_1);
-	//~ _psi_nom = tau*poly_eval(yaw_2_coefs.at(cur_seg_2), poly_t_2) + (1.0+tau)*poly_eval(yaw_1_coefs.at(cur_seg_1), poly_t_1);
-//~ 
-	//~ // nominal velocity
-	//~ _vel_nom(0) = poly_eval(_xv_coefs.at(cur_seg), poly_t_1);
-	//~ _vel_nom(1) = poly_eval(_yv_coefs.at(cur_seg), poly_t_1);
-	//~ _vel_nom(2) = poly_eval(_zv_coefs.at(cur_seg), poly_t_1);
-	//~ _psi1_nom = poly_eval(_yaw1_coefs.at(cur_seg), poly_t_1);
-//~ 
-	//~ // nominal acceleration
-	//~ _acc_nom(0) = poly_eval(_xa_coefs.at(cur_seg), poly_t_1);
-	//~ _acc_nom(1) = poly_eval(_ya_coefs.at(cur_seg), poly_t_1);
-	//~ _acc_nom(2) = poly_eval(_za_coefs.at(cur_seg), poly_t_1);
-	//~ _psi2_nom = poly_eval(_yaw2_coefs.at(cur_seg), poly_t_1);
-//~ 
-	//~ // nominal jerk
-	//~ _jerk_nom(0) = poly_eval(_xj_coefs.at(cur_seg), poly_t_1);
-	//~ _jerk_nom(1) = poly_eval(_yj_coefs.at(cur_seg), poly_t_1);
-	//~ _jerk_nom(2) = poly_eval(_zj_coefs.at(cur_seg), poly_t_1);
-//~ 
-	//~ // nominal snap
-	//~ _snap_nom(0) = poly_eval(_xs_coefs.at(cur_seg), poly_t_1);
-	//~ _snap_nom(1) = poly_eval(_ys_coefs.at(cur_seg), poly_t_1);
-	//~ _snap_nom(2) = poly_eval(_zs_coefs.at(cur_seg), poly_t_1);
-//~ 
-	//~ // nominal force in world frame (eqn 16)
-	//~ _F_nom = _acc_nom*_mass - z_W*(_mass*GRAV);
-	//~ if (_F_nom(2) > 0.0f || _F_nom.length()/_mass < _safe_params.freefall_thresh) {
-		//~ // stabilize min thrust "free fall"
-		//~ _F_nom.zero();
-		//~ _F_nom(2) = -_safe_params.thrust_min;
-	//~ }
-//~ 
-	//~ // nominal thrust, orientation, and angular velocity
-	//~ force_orientation_mapping(_R_N2W, x_nom, y_nom, z_nom,
-		//~ _uT_nom, uT1_nom, _Omg_nom, h_Omega,
-		//~ _F_nom, _psi_nom, _psi1_nom);
-//~ 
-//~ 
-	//~ // nominal angular acceleration
-	//~ uT2_nom = -dot(_snap_nom*_mass + cross(
-		//~ _Omg_nom, cross(_Omg_nom, z_nom)), z_nom);
-	//~ h_alpha = -(_snap_nom*_mass + z_nom*uT2_nom + cross(_Omg_nom, z_nom)*2.0f*uT1_nom + 
-		//~ cross(_Omg_nom, cross(_Omg_nom, z_nom)))*(1.0f/_uT_nom);
-	//~ al_nom(0) = -dot(h_alpha, y_nom);
-	//~ al_nom(1) = dot(h_alpha, x_nom);
-	//~ al_nom(2) = dot(z_nom*_psi2_nom - h_Omega*_psi1_nom, z_W);
-//~ 
-	//~ // nominal moment input
-	//~ math::Matrix<3, 3> R_W2B = _R_B2W.transposed();
-	//~ _M_nom = _J_B*(R_W2B*_R_N2W*al_nom - cross(_Omg_body, R_W2B*_R_N2W*_Omg_nom)) +
-		//~ cross(_Omg_body, _J_B*_Omg_body);
-						//~ 
-//~ 
-    //~ 
-//~ }
 
 math::Matrix<3, 3>
 MulticopterTrajectoryControl::R_om(math::Vector<3> x) {
@@ -1598,48 +1393,34 @@ MulticopterTrajectoryControl::R_om(math::Vector<3> x) {
 }
 
 float
-MulticopterTrajectoryControl::bq_1(math::Vector<12> x) {
-    return sin(x(6))*sin(x(8)) + cos(x(6))*sin(x(7))*cos(x(8));
+MulticopterTrajectoryControl::bq_1(math::Vector<3> att) {
+    return sin(att(0))*sin(att(2)) + cos(att(0))*sin(att(1))*cos(att(2));
 }
 
 float
-MulticopterTrajectoryControl::bq_2(math::Vector<12> x) {
-    return -sin(x(6))*cos(x(8)) + cos(x(6))*sin(x(7))*sin(x(8));
+MulticopterTrajectoryControl::bq_2(math::Vector<3> att) {
+    return -sin(att(0))*cos(att(2)) + cos(att(0))*sin(att(1))*sin(att(2));
 }
 
 float
-MulticopterTrajectoryControl::bq_3(math::Vector<12> x) {
-    return cos(x(6))*cos(x(7));
-}
-
-math::Matrix<3, 3>
-MulticopterTrajectoryControl::rotation_matrix(double z, double y, double x) {
-    float Rz_arr[9] = { (float)cos(z), (float)sin(z), 0, (float)-sin(z), (float)cos(z), 0, 0, 0, 1 };
-    math::Matrix<3, 3> Rz(Rz_arr);
-
-    float Ry_arr[9] = { (float)cos(y), 0, (float)-sin(y), 0, 1, 0, (float)sin(y), 0, (float)cos(y) };
-    math::Matrix<3, 3> Ry(Ry_arr);
-
-    float Rx_arr[9] = { 1, 0, 0, 0, (float)cos(x), (float)sin(x), 0, (float)-sin(x), (float)cos(x) };
-    math::Matrix<3, 3> Rx(Rx_arr);
-
-    return Rz.transposed() * Ry.transposed() * Rx.transposed();
+MulticopterTrajectoryControl::bq_3(math::Vector<3> att) {
+    return cos(att(0))*cos(att(1));
 }
 
 math::Matrix<6, 6>
 MulticopterTrajectoryControl::phi_d(math::Vector<6> x) {
-    math::Vector<3> x_input;
-    x_input(0) = x(0);
-    x_input(1) = x(1);
-    x_input(2) = x(2);
-    math::Matrix<3, 3> R_om_x = R_om(x_input);
+    math::Vector<3> att_input;
+    att_input(0) = x(0);
+    att_input(1) = x(1);
+    att_input(2) = x(2);
+    math::Matrix<3, 3> R_om_att = R_om(att_input);
 
     float mat_arr[36] = { 1, 0, 0, 0, 0, 0,
                           0, 1, 0, 0, 0, 0,
                           0, 0, 1, 0, 0, 0,
-                          0, -x(5) * (float)cos(x(1)), 0, R_om_x(0, 0), R_om_x(0, 1), R_om_x(0, 2),
-                         -x(4) * (float)sin(x(0)) + x(5) * (float)cos(x(0)) * (float)cos(x(1)), -x(5) * (float)sin(x(0)) * (float)sin(x(1)), 0, R_om_x(1, 0), R_om_x(1, 1), R_om_x(1, 2),
-                         -x(4) * (float)cos(x(0)) - x(5) * (float)sin(x(0)) * (float)cos(x(1)), -x(5) * (float)cos(x(0)) * (float)sin(x(1)), 0, R_om_x(2, 0), R_om_x(2, 1), R_om_x(2, 2)};
+                          0, -x(5) * (float)cos(x(1)), 0, R_om_att(0, 0), R_om_att(0, 1), R_om_att(0, 2),
+                         -x(4) * (float)sin(x(0)) + x(5) * (float)cos(x(0)) * (float)cos(x(1)), -x(5) * (float)sin(x(0)) * (float)sin(x(1)), 0, R_om_att(1, 0), R_om_att(1, 1), R_om_att(1, 2),
+                         -x(4) * (float)cos(x(0)) - x(5) * (float)sin(x(0)) * (float)cos(x(1)), -x(5) * (float)cos(x(0)) * (float)sin(x(1)), 0, R_om_att(2, 0), R_om_att(2, 1), R_om_att(2, 2)};
 
     math::Matrix<6, 6> mat(mat_arr);
     return mat;
@@ -1667,169 +1448,50 @@ MulticopterTrajectoryControl::f_rot(math::Vector<6> x) {
 
 math::Matrix<6, 6>
 MulticopterTrajectoryControl::M(math::Vector<6> x) {
-    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
-                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
-                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
-                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
-                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
-                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
-    math::Matrix<6, 6> M_q(M_q_arr);
 
-    // maybe make M_q a global variable
-    // make sure solve is correct!
     math::Matrix<6, 6> temp = phi_d(x).inversed();
-    return M_q * temp;
+    return _Mq * temp;
 }
 
 /* Apply feedback control to nominal trajectory */
 void
-MulticopterTrajectoryControl::trajectory_feedback_controller(math::Vector<12> x_nom, math::Vector<12> x_act, math::Vector<3> accel, float dt)
+MulticopterTrajectoryControl::trajectory_feedback_controller()
 {
-    /* position and velocity errors */
-    math::Vector<3> pos_err = _pos - _pos_nom;
-    math::Vector<3> vel_err = _vel - _vel_nom;
 
-    math::Vector<3> a_des = accel; // check
-    float kx = float(16) * _mass;
-    float kv = float(5.6) * _mass;
-
-    math::Vector<3> temp({0, 0, 1});
-
-    math::Vector<3> thrust_des = pos_err * -kx - vel_err * kv - temp * _mass * GRAV + a_des * _mass;
-
-    math::Matrix<3, 3> R = rotation_matrix(x_nom(8), x_nom(7), x_nom(6));
-
-    float thrust = thrust_des * (R * -temp);
-
-    math::Vector<3> zb_des = -thrust_des / thrust_des.length();
-
-    float yaw_des = x_nom(8);
-    float pitch_des = atan2((zb_des(0) * (float)cos(yaw_des) + zb_des(1) * (float)sin(yaw_des)), (zb_des(2)));
-    float roll_des = atan2(zb_des(0) * (float)sin(yaw_des) - zb_des(1) * (float)cos(yaw_des), zb_des(2) / (float)cos(pitch_des));
-
-    math::Vector<3> att_des;
-    att_des(0) = roll_des;
-    att_des(1) = pitch_des;
-    att_des(2) = yaw_des;
-
-    math::Vector<3> rate_eul_des;
-    math::Vector<3> om_des;
-    math::Vector<3> torque_nom;
-
-    if (_entered_trajectory_feedback_controller) {
-        rate_eul_des = (att_des - _att_des_prev) / dt;
-        om_des = R_om(att_des) * rate_eul_des;
-        math::Vector<3> ang_accel_des = (om_des - _om_des_prev)/dt;
-
-        torque_nom = _J_B * ang_accel_des + cross(om_des, _J_B*om_des);
-
-        _att_des_prev = att_des;
-        _om_des_prev = om_des;
-    } else {
-        _entered_trajectory_feedback_controller = true;
-        math::Vector<3> bq_temp({ bq_1(x_act), bq_2(x_act), bq_3(x_act) });
-        math::Vector<3> a_pred = temp * GRAV + bq_temp * thrust * ((float)-1.0 / _mass);
-        math::Vector<3> x_pred = _pos + _vel * dt;
-        math::Vector<3> v_pred = _vel + a_pred * dt;
-
-        math::Vector<3> err_x_pred = x_pred - _pos;       // not sure if this is right (what is state_nom)
-        math::Vector<3> err_v_pred = v_pred - _vel;       // not sure
-
-        a_des = accel;      // CHECK -- hardcode?
-
-        math::Vector<3> thrust_des_pred = err_x_pred * -kx - err_v_pred * kv - temp * _mass * GRAV + a_des * _mass;
-        math::Vector<3> zb_des_pred = -thrust_des_pred / thrust_des_pred.length();
-
-        float yaw_des_pred = 0;          // CHECK!! not sure what state_nom(2, 9) should be
-        float pitch_des_pred = atan2(zb_des_pred(0) * (float)cos(yaw_des_pred) + zb_des_pred(1) * (float)sin(yaw_des_pred), zb_des_pred(2));
-        float roll_des_pred = atan2(zb_des_pred(0) * (float)sin(yaw_des_pred) - zb_des_pred(1) * (float)cos(yaw_des_pred), zb_des_pred(2) / (float)cos(pitch_des_pred));
-
-        math::Vector<3> att_des_pred;
-        att_des_pred(0) = roll_des_pred;
-        att_des_pred(1) = pitch_des_pred;
-        att_des_pred(2) = yaw_des_pred;
-
-        rate_eul_des = (att_des_pred - att_des) / dt;
-        om_des = R_om(att_des) * rate_eul_des;
-
-        math::Matrix<3, 3> R_nom = rotation_matrix(x_nom(9), x_nom(8), x_nom(7));
-        math::Matrix<3, 3> R_des = rotation_matrix(att_des(3), att_des(2), att_des(1));
-
-        float ang_a_arr[3] = { 0.0, 0.0, 0.0 };
-        math::Vector<3> ang_a(ang_a_arr);
-        math::Vector<3> ang_accel_des = R_des.transposed() * R_nom * ang_a;
-        torque_nom = _J_B * ang_accel_des + cross(om_des, _J_B * om_des);
-
-        _att_des_prev = att_des;
-        _om_des_prev = om_des;
-    }
-
-    math::Vector<3> att;
-    att(0) = x_act(6);
-    att(1) = x_act(7);
-    att(2) = x_act(8);
-
-    math::Vector<3> eul;
-    eul(0) = x_act(9);
-    eul(1) = x_act(10);
-    eul(2) = x_act(11);
-
-    math::Vector<3> rate_eul_act = R_om(att).inversed() * eul;  // check
-
-    float q_des_arr[6] = { att_des(0), att_des(1), att_des(2), rate_eul_des(0), rate_eul_des(1), rate_eul_des(2) };
+    float q_des_arr[6] = { _Euler_des(0), _Euler_des(1), _Euler_des(2), _Euler_rate_des(0), _Euler_rate_des(1), _Euler_rate_des(2) };
     math::Vector<6> q_des(q_des_arr);
 
-    float q_act_arr[6] = { x_act(6), x_act(7), x_act(8), rate_eul_act(0), rate_eul_act(1), rate_eul_act(2) };
+    float q_act_arr[6] = { _Euler_angles(0), _Euler_angles(1), _Euler_angles(2), _Euler_rates(0), _Euler_rates(1), _Euler_rates(2) };
     math::Vector<6> q_act(q_act_arr);
 
-    float xi_q_des_arr[6] = { att_des(0), att_des(1), att_des(2), om_des(0), om_des(1), om_des(2) };
+    float xi_q_des_arr[6] = { _Euler_des(0), _Euler_des(1), _Euler_des(2), _Omg_nom(0), _Omg_nom(1), _Omg_nom(2) };
     math::Vector<6> xi_q_des(xi_q_des_arr);
 
-    float xi_q_act_arr[6] = { x_act(6), x_act(7), x_act(8), x_act(9), x_act(10), x_act(11) };
+    float xi_q_act_arr[6] = { _Euler_angles(0), _Euler_angles(1), _Euler_angles(2), _Omg_body(0), _Omg_body(1), _Omg_body(2) };
     math::Vector<6> xi_q_act(xi_q_act_arr);
-
-    // maybe make M_q global
-    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
-                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
-                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
-                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
-                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
-                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
-    math::Matrix<6, 6> M_q(M_q_arr);
 
     math::Matrix<6, 1> Xq_dot;
     Xq_dot.set_col(0, q_act-q_des);
-    math::Matrix<1, 1> E = Xq_dot.transposed() * M_q * Xq_dot;
+    math::Matrix<1, 1> E_mat = Xq_dot.transposed() * _Mq * Xq_dot;
+    float E = E_mat(0,0);
 
-    math::Matrix<3, 3> B_temp = _J_B.inversed();
-    float B_rot_arr[18] = { 0, 0, 0,
-                            0, 0, 0,
-                            0, 0, 0,
-                            B_temp(0, 0), 0, 0,
-                            0, B_temp(1, 1), 0,
-                            0, 0, B_temp(2, 2) };
-    math::Matrix<6, 3> B_rot(B_rot_arr);
-
-    math::Matrix<1, 3> A = (Xq_dot * (float)2).transposed() *
-                           (M(q_act) * B_rot);
+    math::Matrix<1, 3> A = (Xq_dot * 2.0).transposed() *
+                           (M(q_act) * _B_rot);
 
 //    float infinity = std::numeric_limits<float>::infinity();
 //    float l_b = -infinity;
     float lambda = 2.5;
-    float u_b = (E * (float)-2 * lambda)(0, 0) +            // (0, 0) gets float from math::Matrix
-                (Xq_dot.transposed() * (M(q_des) * (f_rot(xi_q_des) * (float)2 + B_rot * torque_nom)))(0) -     // (0) gets float from math::Vector
-                (Xq_dot.transposed() * (M(q_act) * (f_rot(xi_q_act) * (float)2 + B_rot * torque_nom)))(0);      // (0) gets float from math::Vector
+    float u_b = E * lambda +
+                (Xq_dot.transposed() * (M(q_des) * (f_rot(xi_q_des) + _B_rot * _M_nom)))(0) -     // (0) gets float from math::Vector
+                (Xq_dot.transposed() * (M(q_act) * (f_rot(xi_q_act) + _B_rot * _M_nom)))(0);      // (0) gets float from math::Vector
 
-    float a = -u_b;
+    float a = (-2.0f)*u_b;
     math::Vector<3> b( {A(0, 0), A(0, 1), A(0, 2)} );
-    math::Vector<3> u_aux;
 
-    if (b.length() == 0 || (a <= 0)) {   // comparing floating point with == is unsafe
-        u_aux(0) = 0.0;
-        u_aux(1) = 0.0;
-        u_aux(2) = 0.0;
+    if ((a <= 0.0f) || (b.length() <= 0.001f)) {
+        _M_cor.zero();
     } else {
-        u_aux = b * -(a / (A * b)(0));
+        _M_cor = b * -(a / (A * b)(0));
     }
 }
 
@@ -1861,6 +1523,8 @@ MulticopterTrajectoryControl::task_main()
     bool was_armed = false;
     _control_trajectory_started = false;
     _entered_trajectory_feedback_controller = false;
+    _started_feedback = false;
+
     bool was_flag_control_trajectory_enabled = false;
 
 
@@ -1893,6 +1557,24 @@ MulticopterTrajectoryControl::task_main()
     _J_B(0, 0) = X_INERTIA_EST;
     _J_B(1, 1) = Y_INERTIA_EST;
     _J_B(2, 2) = Z_INERTIA_EST;
+
+    _kx = float(16) * _mass;
+    _kv = float(5.6) * _mass;
+    float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
+                          -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
+                          -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
+                          17.8808272728795, 1.46924185101066e-22, 1.46924201295359e-22, 7.15233090780381, 5.87696988361298e-23, 5.87696957170912e-23,
+                          1.46924245242847e-22, 17.8808272728795, 1.46924233877655e-22, 5.87696988361298e-23, 7.15233090780380, 5.87696956509190e-23,
+                          1.46924213453325e-22, 1.46924180540221e-22, 17.8808272728795, 5.87696957170912e-23, 5.87696956509190e-23, 7.15233090780380 };
+    _Mq.set(M_q_arr);
+    float B_rot_arr[18] = { 0, 0, 0,
+                            0, 0, 0,
+                            0, 0, 0,
+                            1.0f/_J_B(0, 0), 0, 0,
+                            0, 1.0f/_J_B(1,1), 0,
+                            0, 0, 1.0f/_J_B(2,2)};
+    _B_rot.set(B_rot_arr);
+
     _alpha = THROTTLE_FILTER_SMOOTHING;
     _alpha = (_alpha < 0.0f) ? 0.0f : _alpha;
     _alpha = (_alpha > 1.0f) ? 1.0f : _alpha;
@@ -2138,7 +1820,7 @@ MulticopterTrajectoryControl::task_main()
 					
 					trajectory_transition_pos_vel (cur_transition_t,
 						x_trans_coefs, y_trans_coefs, z_trans_coefs,
-						vx_trans_coefs, vy_trans_coefs, vz_trans_coefs);
+						vx_trans_coefs, vy_trans_coefs, vz_trans_coefs,dt);
 					
 				} else {
 					
@@ -2158,46 +1840,13 @@ MulticopterTrajectoryControl::task_main()
 								cur_spline_t - _spline_cumt_sec.at(cur_seg-1);
 					float poly_term_t = cur_seg == 0 ? 0.0f : _spline_delt_sec.at(cur_seg-1);
 					
-					
-					/**
-					 * Calculate nominal states and inputs
-					 */
-					//~ if (0 				< prev_spline_t 				&& 
-						//~ prev_spline_t 	< _prev_spline_term_t_sec_rel 	&& 
-						//~ 0 				< cur_spline_t 					&& 
-						//~ cur_spline_t 	< _spline_term_t_sec_rel 		&& 
-						//~ cur_spline_t 	< SPLINE_TRANS_T_SEC_REL		&&
-						//~ _spline_start_t_sec_abs + SPLINE_TRANS_T_SEC_REL < _prev_spline_start_t_sec_abs + _prev_spline_term_t_sec_rel) {
-	//~ 
-						//~ // determine polynomial segment for previous spline
-						//~ std::vector<float>::iterator prev_seg_it;
-						//~ prev_seg_it = std::lower_bound(_prev_spline_cumt_sec.begin(), 
-							//~ _prev_spline_cumt_sec.end(), prev_spline_t);
-						//~ int prev_seg = (int)(prev_seg_it - _prev_spline_cumt_sec.begin());
-	//~ 
-						//~ 
-						//~ // determine time in polynomial segment
-						//~ float prev_poly_t = prev_seg == 0 ? prev_spline_t :
-									//~ prev_spline_t - _prev_spline_cumt_sec.at(prev_seg-1);
-						//~ // float prev_poly_term_t = prev_seg == 0 ? 0.0f : _prev_spline_delt_sec.at(cur_seg-1);
-						//~ 
-							//~ 
-						//~ // Calculate smooth transition between trajectories
-						//~ dual_trajectory_transition_nominal_state(cur_spline_t, cur_seg, cur_poly_t, 
-							//~ prev_spline_t, prev_seg, prev_poly_t);
-							//~ 
-							//~ 
-					//~ } else {
-						//~ trajectory_nominal_state(cur_spline_t, _spline_term_t_sec_rel, cur_seg, cur_poly_t, poly_term_t);
-					//~ }
-					
-					trajectory_nominal_state(cur_spline_t, _spline_term_t_sec_rel, cur_seg, cur_poly_t, poly_term_t);
+					trajectory_nominal_state(cur_spline_t, _spline_term_t_sec_rel, cur_seg, cur_poly_t, poly_term_t,dt);
 				
 				}
             
             } else {
                 // perform position hold
-                hold_position();
+                hold_position(dt);
                 
             }
                   
@@ -2205,27 +1854,11 @@ MulticopterTrajectoryControl::task_main()
             /**
              * Apply feedback control to nominal trajectory
              */
-            float arr_x_nom[12] = { 0, 1, 0, 1.25663706143592, 0, 0, -0.159602993655440, 0, 0, 0, 0.199712626559595, 0.0321481691016627 };
-            math::Vector<12> x_nom(arr_x_nom);
+            trajectory_feedback_controller();
 
-            float arr_x_act[12] = { -0.0666838971714053,
-                                 1.05637461391708,
-                                 0.0175089705301656,
-                                 1.24168375991927,
-                                 0.00114448963758149,
-                                 -0.0130997717483046,
-                                 -0.251243898971014,
-                                 -0.0149566498975779,
-                                 -0.0435302487530237,
-                                 -0.0512711222443734,
-                                 0.139163577459043,
-                                 0.00421118418670079 };
-            math::Vector<12> x_act(arr_x_act);
+            _uT_sp = _uT_nom; // fbck and ffwd done
 
-            float arr_accel[3] = { 0, -1.57913670417430, 0 };
-            math::Vector<3> accel(arr_accel);
-
-            trajectory_feedback_controller(x_nom, x_act, accel, dt);
+            _M_sp = _M_nom + _M_cor;
             _att_control = _M_sp;
             
             /**
