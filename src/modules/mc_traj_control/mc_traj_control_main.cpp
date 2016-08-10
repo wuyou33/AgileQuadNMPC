@@ -1094,7 +1094,7 @@ MulticopterTrajectoryControl::feedback_fwd(math::Vector<3> pos_nom_next, math::V
 	z_W(2) = 1.0f;
 
 	math::Vector<3> bq_temp({ bq_1(_Euler_angles), bq_2(_Euler_angles), bq_3(_Euler_angles) });
-	math::Vector<3> a_pred = z_W*GRAV + bq_temp*_uT_nom*((float)-1.0 / _mass);
+	math::Vector<3> a_pred = z_W*GRAV - bq_temp*_uT_nom*(1.0f / _mass);
 	math::Vector<3> x_pred = _pos + _vel * dt;
 	math::Vector<3> v_pred = _vel + a_pred * dt;
 
@@ -1110,8 +1110,8 @@ MulticopterTrajectoryControl::feedback_fwd(math::Vector<3> pos_nom_next, math::V
 	math::Vector<3> z_s_next = -F_next.normalized();	// (eqn 15)
 
 	float yaw_des_next = psi_nom_next;
-	float pitch_des_next = atan2((z_s_next(0) * (float)cos(yaw_des_next) + z_s_next(1) * (float)sin(yaw_des_next)), (z_s_next(2)));
-	float roll_des_next = atan2(z_s_next(0) * (float)sin(yaw_des_next) - z_s_next(1) * (float)cos(yaw_des_next), z_s_next(2) / (float)cos(pitch_des_next));
+	float pitch_des_next = atan2((z_s_next(0)*cosf(yaw_des_next) + z_s_next(1)*sinf(yaw_des_next)), (z_s_next(2)));
+	float roll_des_next = atan2(z_s_next(0)*sinf(yaw_des_next) - z_s_next(1)*cosf(yaw_des_next), z_s_next(2)/cosf(pitch_des_next));
 
 	Euler_des_next(0) = roll_des_next;
 	Euler_des_next(1) = pitch_des_next;
@@ -1151,6 +1151,9 @@ MulticopterTrajectoryControl::hold_position(const float dt)
                     _F_nom, _psi_nom, _Euler_des_prev, dt);
    
     math::Vector<3> ang_a; ang_a.zero();
+
+    mavlink_log_info(_mavlink_fd, "[mtc] entered hold position: %.2f, %.2f", (double)_uT_nom, (double)dt);
+
     if (_started_feedback || _entered_trajectory_feedback_controller){
     	// can trust _Omg_nom & _Euler_rate_des from orientation mapping
 		ang_a = (_Omg_nom - _om_des_prev)/dt;
@@ -1192,8 +1195,8 @@ MulticopterTrajectoryControl::force_orientation_mapping(
         //TODO: put gimbal lock check here
 
         float yaw_des = psi_s;
-        float pitch_des = atan2((z_s(0) * (float)cos(yaw_des) + z_s(1) * (float)sin(yaw_des)), (z_s(2)));
-        float roll_des = atan2(z_s(0) * (float)sin(yaw_des) - z_s(1) * (float)cos(yaw_des), z_s(2) / (float)cos(pitch_des));
+        float pitch_des = atan2((z_s(0)*cosf(yaw_des) + z_s(1)*sinf(yaw_des)), (z_s(2)));
+        float roll_des = atan2(z_s(0)*sinf(yaw_des) - z_s(1)*cosf(yaw_des), z_s(2) / cosf(pitch_des));
 
         Euler_s(0) = roll_des; Euler_s(1) = pitch_des; Euler_s(2) = yaw_des;
 
@@ -1475,23 +1478,29 @@ MulticopterTrajectoryControl::trajectory_feedback_controller()
     math::Matrix<1, 1> E_mat = Xq_dot.transposed() * _Mq * Xq_dot;
     float E = E_mat(0,0);
 
-    math::Matrix<1, 3> A = (Xq_dot * 2.0).transposed() *
+    math::Matrix<1, 3> A = (Xq_dot * 2.0f).transposed() *
                            (M(q_act) * _B_rot);
 
 //    float infinity = std::numeric_limits<float>::infinity();
 //    float l_b = -infinity;
     float lambda = 2.5;
-    float u_b = E * lambda +
+    float u_b = -E*lambda +
                 (Xq_dot.transposed() * (M(q_des) * (f_rot(xi_q_des) + _B_rot * _M_nom)))(0) -     // (0) gets float from math::Vector
                 (Xq_dot.transposed() * (M(q_act) * (f_rot(xi_q_act) + _B_rot * _M_nom)))(0);      // (0) gets float from math::Vector
 
-    float a = (-2.0f)*u_b;
+    float a = (2.0f)*u_b;
     math::Vector<3> b( {A(0, 0), A(0, 1), A(0, 2)} );
+
+    for (int i = 0; i<3; i++){
+    	if (fabs(b(i)) <= 0.001){
+    		b(i) = 0.0f;
+    	}
+    }
 
     if ((a <= 0.0f) || (b.length() <= 0.001f)) {
         _M_cor.zero();
     } else {
-        _M_cor = b * -(a / (A * b)(0));
+        _M_cor = -b * (a / (A * b)(0));
     }
 }
 
@@ -1558,8 +1567,8 @@ MulticopterTrajectoryControl::task_main()
     _J_B(1, 1) = Y_INERTIA_EST;
     _J_B(2, 2) = Z_INERTIA_EST;
 
-    _kx = float(16) * _mass;
-    _kv = float(5.6) * _mass;
+    _kx = 16.0f * _mass;
+    _kv = 5.6f * _mass;
     float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
                           -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
                           -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
@@ -1639,6 +1648,8 @@ MulticopterTrajectoryControl::task_main()
             _control_trajectory_started){
         
             _control_trajectory_started = false;
+            _entered_trajectory_feedback_controller = false;
+            _started_feedback = false;
         }
         
         /* reset trajectory data when switched out of traj control */
@@ -1861,6 +1872,8 @@ MulticopterTrajectoryControl::task_main()
             _M_sp = _M_nom + _M_cor;
             _att_control = _M_sp;
             
+            mavlink_log_info(_mavlink_fd, "[mtc] applied feedback, net thrust: %.2f", (double)_uT_nom);
+
             /**
              * Apply filter to map thrust to throttle and apply safety
              * NOTE: assume quadrotor is in air
