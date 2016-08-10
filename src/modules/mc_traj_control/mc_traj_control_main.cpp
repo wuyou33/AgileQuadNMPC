@@ -387,7 +387,7 @@ private:
     /**
      * convert SO(3) matrix to R3 vector. Note it does not check in M is element of SO(3)
      */
-    math::Vector<3> vee_map(const math::Matrix<3, 3>& M);
+    math::Vector<3> vee_map(const math::Matrix<3, 3>& Rv);
     
     /**
      * set columns in matrix
@@ -426,10 +426,10 @@ private:
     math::Vector<6>                 f_rot(math::Vector<6>);
 
     void        reset_trajectory();
-    void		hold_position(const float dt);
+    void		hold_position(float dt);
     void		force_orientation_mapping(math::Matrix<3,3>& R_S2W, math::Vector<3>& Euler_s, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
                     float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& Euler_rate_s,
-                    math::Vector<3>& h_Omega,const math::Vector<3>& F_s, const float psi_s, const math::Vector<3>& Euler_s_prev, const float dt);
+                    math::Vector<3>& h_Omega,const math::Vector<3>& F_s, const float psi_s, const math::Vector<3>& Euler_s_prev, float dt);
     
     /**
      * Evaluate polynomials
@@ -860,13 +860,13 @@ MulticopterTrajectoryControl::dot(const math::Vector<3>& v1,
 }
 
 math::Vector<3>
-MulticopterTrajectoryControl::vee_map(const math::Matrix<3, 3>& M)
+MulticopterTrajectoryControl::vee_map(const math::Matrix<3, 3>& Rv)
 {
     /* convert SO(3) matrix to R3 */
     math::Vector<3> res;	res.zero();
-    res(0) = M(2, 1);
-    res(1) = M(0, 2);
-    res(2) = M(1, 0);
+    res(0) = Rv(2, 1);
+    res(1) = Rv(0, 2);
+    res(2) = Rv(1, 0);
     
     return res;
 }
@@ -1123,13 +1123,16 @@ MulticopterTrajectoryControl::feedback_fwd(math::Vector<3> pos_nom_next, math::V
 
 /* hold position */
 void
-MulticopterTrajectoryControl::hold_position(const float dt)
+MulticopterTrajectoryControl::hold_position(float dt)
 {
     // reset position and alt if necessary
     reset_pos_nom();
     reset_alt_nom();
     reset_psi_nom();
     
+    math::Vector<3> z_W; z_W.zero();
+    z_W(2) = 1.0f;
+
     // set position derivatives to zero
     _vel_nom.zero();
     _acc_nom.zero();
@@ -1138,9 +1141,11 @@ MulticopterTrajectoryControl::hold_position(const float dt)
     _psi1_nom = 0.0f;
     _psi2_nom = 0.0f;
     
-    // Force to just counteract gravity
-    _F_nom.zero();
-    _F_nom(2) = -_mass*GRAV;
+    math::Vector<3> ex = _pos - _pos_nom;
+	math::Vector<3> ev = _vel - _vel_nom;
+
+	_F_nom = _acc_nom*_mass - z_W*(_mass*GRAV) - ex*_kx - ev*_kv;
+
     math::Vector<3> x_nom;	x_nom.zero();
     math::Vector<3> y_nom;	y_nom.zero();
     math::Vector<3> z_nom;	z_nom.zero();
@@ -1152,7 +1157,6 @@ MulticopterTrajectoryControl::hold_position(const float dt)
    
     math::Vector<3> ang_a; ang_a.zero();
 
-    mavlink_log_info(_mavlink_fd, "[mtc] entered hold position: %.2f, %.2f", (double)_uT_nom, (double)dt);
 
     if (_started_feedback || _entered_trajectory_feedback_controller){
     	// can trust _Omg_nom & _Euler_rate_des from orientation mapping
@@ -1183,7 +1187,7 @@ MulticopterTrajectoryControl::force_orientation_mapping(
         math::Matrix<3,3>& R_S2W, math::Vector<3>& Euler_s, math::Vector<3>& x_s, math::Vector<3>& y_s, math::Vector<3>& z_s,
         float& uT_s, float& uT1_s, math::Vector<3>& Om_s, math::Vector<3>& Euler_rate_s, math::Vector<3>& h_Omega,
         const math::Vector<3>& F_s, const float psi_s, const math::Vector<3>& Euler_s_prev,
-        const float dt)
+        float dt)
 {
 
         // nominal thrust input
@@ -1473,6 +1477,41 @@ MulticopterTrajectoryControl::trajectory_feedback_controller()
     float xi_q_act_arr[6] = { _Euler_angles(0), _Euler_angles(1), _Euler_angles(2), _Omg_body(0), _Omg_body(1), _Omg_body(2) };
     math::Vector<6> xi_q_act(xi_q_act_arr);
 
+    // Before computing feedback - publish nominal setpoints
+    _uT_sp = _uT_nom; // already incorporates feedback
+
+    _att_sp.timestamp = hrt_absolute_time();
+	_att_sp.roll_body = _Euler_des(0);
+	_att_sp.pitch_body = _Euler_des(1);
+	_att_sp.yaw_body = _Euler_des(2);
+
+	_att_sp.R_valid = false;
+	_att_sp.thrust = _uT_sp;
+	_att_sp.q_d_valid = false;
+	_att_sp.q_e_valid = false;
+
+	/* publish attitude setpoint */
+    if (_att_sp_pub > 0) {
+        orb_publish(ORB_ID(vehicle_attitude_setpoint), _att_sp_pub, &_att_sp);
+
+    } else {
+        _att_sp_pub = orb_advertise(ORB_ID(vehicle_attitude_setpoint), &_att_sp);
+    }
+
+    // Fill rates setpoint
+    _att_rates_sp.timestamp = hrt_absolute_time();
+    _att_rates_sp.roll = _Euler_rate_des(0);
+	_att_rates_sp.pitch = _Euler_rate_des(1);
+	_att_rates_sp.yaw = _Euler_rate_des(2);
+
+	/* publish attitude rates setpoint */
+	if (_att_rates_sp_pub > 0) {
+		orb_publish(ORB_ID(vehicle_rates_setpoint), _att_rates_sp_pub, &_att_rates_sp);
+
+	} else {
+		_att_rates_sp_pub = orb_advertise(ORB_ID(vehicle_rates_setpoint), &_att_rates_sp);
+	}
+
     math::Matrix<6, 1> Xq_dot;
     Xq_dot.set_col(0, q_act-q_des);
     math::Matrix<1, 1> E_mat = Xq_dot.transposed() * _Mq * Xq_dot;
@@ -1497,11 +1536,15 @@ MulticopterTrajectoryControl::trajectory_feedback_controller()
     	}
     }
 
-    if ((a <= 0.0f) || (b.length() <= 0.001f)) {
+    float b_norm = b.length();
+    if ((a <= 0.0f) || (b_norm <= 0.001f)) {
         _M_cor.zero();
     } else {
-        _M_cor = -b * (a / (A * b)(0));
+        _M_cor = -b * (a / (b_norm*b_norm));
     }
+
+    // Net moment
+    _M_sp = _M_nom + _M_cor;
 }
 
 void
@@ -1567,8 +1610,8 @@ MulticopterTrajectoryControl::task_main()
     _J_B(1, 1) = Y_INERTIA_EST;
     _J_B(2, 2) = Z_INERTIA_EST;
 
-    _kx = 16.0f * _mass;
-    _kv = 5.6f * _mass;
+    _kx = 4.0f * _mass;
+    _kv = 4.0f * _mass;
     float M_q_arr[36] = { 96.5564672720308, -5.87671199263202e-23, -5.87671168055113e-23, 17.8808272728795, 1.46924245242847e-22, 1.46924213453325e-22,
                           -5.87671199263202e-23, 96.5564672720307, -5.87671167418803e-23, 1.46924185101066e-22, 17.8808272728795, 1.46924180540221e-22,
                           -5.87671168055113e-23, -5.87671167418802e-23, 96.5564672720307, 1.46924201295359e-22, 1.46924233877655e-22, 17.8808272728795,
@@ -1866,14 +1909,11 @@ MulticopterTrajectoryControl::task_main()
              * Apply feedback control to nominal trajectory
              */
             trajectory_feedback_controller();
-
-            _uT_sp = _uT_nom; // fbck and ffwd done
-
-            _M_sp = _M_nom + _M_cor;
             _att_control = _M_sp;
             
-            mavlink_log_info(_mavlink_fd, "[mtc] applied feedback, net thrust: %.2f", (double)_uT_nom);
+            // mavlink_log_info(_mavlink_fd, "[mtc] applied feedback, net thrust: %.2f", (double)_uT_sp);
 
+            printf("DEBUG: thrust: %d \n", (int)(_uT_sp*10.0f));
             /**
              * Apply filter to map thrust to throttle and apply safety
              * NOTE: assume quadrotor is in air
